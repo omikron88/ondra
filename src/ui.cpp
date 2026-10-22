@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <functional>
@@ -91,7 +92,12 @@ void Desktop::restorePreferences(Options& options) {
     }
     if (!args.count("--sd")) { const auto path=get("sd",""); if (!path.empty() && isDirectory(path)) options.sd=path; }
     if (!args.count("--turbo")) options.turbo=get("turbo",options.turbo?"1":"0")=="1";
-    if (!args.count("--melodik")) options.melodik=get("melodik",options.melodik?"1":"0")=="1";
+    if (!args.count("--melodik") && !args.count("--printer") && !args.count("--bt100") && !args.count("--bt100-output")) {
+        const auto device=get("printerDevice",get("melodik",options.melodik?"1":"0")=="1"?"melodik":"none");
+        options.melodik=device=="melodik";
+        if (device=="centronics") options.printer=get("printerFile","");
+        options.bt100=device=="bt100"; // Restored BT100 starts with its physical switch off.
+    }
     if (!args.count("--mute")) options.mute=get("sound",options.mute?"0":"1")=="0";
     if (!args.count("--scale")) { try { const unsigned n=number(get("scale",std::to_string(options.scale)),8); if (n) options.scale=n; } catch (const std::exception&) {} }
 }
@@ -105,6 +111,9 @@ struct Desktop::Impl {
     std::vector<std::uint32_t> scaledPixels;
     bool run=true,stop=false,audio=true,fullscreen=false,scanlines=false,scale2x=false;
     bool settings=false,debugger=false,keyboard=false,about=false,settingsWasPaused=false;
+    bool printerWindow=false,followPrinter=true;
+    int paperZoom=1,lastPaperRow=-1,settingPrinter=0;
+    Path printerDestination={}; std::string reportedPrinterError;
     unsigned scale=2; int rom=0;
     Path romA={},romB={},sdDirectory={}; std::string activeSd,activeRomA,activeRomB;
     bool settingAudio=true,settingMelodik=false,settingTurbo=false,settingFull=false,settingScan=false,settingScale2x=false,settingSd=false;
@@ -116,7 +125,7 @@ struct Desktop::Impl {
     std::array<unsigned,6> bpAddresses={{0,0,0,0,0,0}};
     std::array<bool,6> bpEnabled={{false,false,false,false,false,false}};
     std::uint64_t tstateOrigin=0;
-    enum class File { None,TapeOpen,TapeSave,SnapshotOpen,SnapshotSave,MemoryOpen,MemorySave,Screenshot,SdDirectory,RomA,RomB };
+    enum class File { None,TapeOpen,TapeSave,SnapshotOpen,SnapshotSave,MemoryOpen,MemorySave,Screenshot,SdDirectory,RomA,RomB,PrinterOutput,Bt100Image };
     File file=File::None;
     bool fileRequest=false,fileWasPaused=false,showHidden=false,headered=true,autorun=true,overwrite=false;
     unsigned loadAddress=0x4000,saveAddress=0x4000,saveSize=0x1000,entryAddress=0x4000;
@@ -131,6 +140,9 @@ struct Desktop::Impl {
         const auto saved=preferences(o);
         auto flag=[&](const char* name) { const auto p=saved.find(name); return p!=saved.end() && p->second=="1"; };
         scanlines=flag("scanlines"); scale2x=flag("scale2x");
+        printerWindow=m.bt100().enabled();
+        const auto printerFile=saved.find("printerFile");
+        text(printerDestination,!o.printer.empty()?o.printer:printerFile!=saved.end()?printerFile->second:"printer.prn");
         const auto last=saved.find("directory");
         lastDirectory=last!=saved.end() && isDirectory(last->second)?last->second:friendly(canonical("."));
         if (lastDirectory.empty()) lastDirectory=".";
@@ -192,6 +204,8 @@ struct Desktop::Impl {
         std::map<std::string,std::string> values;
         values["rom"]=m.romName(); values["romA"]=activeRomA; values["romB"]=activeRomB; values["sd"]=activeSd;
         values["sound"]=audio?"1":"0"; values["melodik"]=m.sound().melodik()?"1":"0";
+        values["printerDevice"]=m.printer().enabled()?"centronics":m.bt100().enabled()?"bt100":m.sound().melodik()?"melodik":"none";
+        values["printerFile"]=printerDestination.data();
         values["turbo"]=m.turbo()?"1":"0"; values["scale"]=std::to_string(scale);
         values["fullscreen"]=fullscreen?"1":"0"; values["scanlines"]=scanlines?"1":"0"; values["scale2x"]=scale2x?"1":"0";
         values["directory"]=lastDirectory;
@@ -240,6 +254,7 @@ struct Desktop::Impl {
         settingsWasPaused=stop; stop=true; settings=true; rom=romIndex(m.romName());
         text(romA,activeRomA); text(romB,activeRomB); text(sdDirectory,activeSd);
         settingAudio=audio; settingMelodik=m.sound().melodik(); settingTurbo=m.turbo(); settingFull=fullscreen;
+        settingPrinter=m.printer().enabled()?1:m.bt100().enabled()?2:0;
         settingScan=scanlines; settingScale2x=scale2x; settingScale=scale; settingSd=!activeSd.empty();
     }
     void openDebugger() {
@@ -252,7 +267,7 @@ struct Desktop::Impl {
     }
     void open(File mode) {
         file=mode; fileRequest=true; fileWasPaused=stop; stop=true; fileError.clear(); pendingPath.clear(); overwrite=false;
-        text(browserPath,lastDirectory); text(fileName,mode==File::SnapshotSave?"ondra.osn":mode==File::TapeSave?"recording.csw":mode==File::MemorySave?"memory.bin":mode==File::Screenshot?"screenshot.ppm":"");
+        text(browserPath,lastDirectory); text(fileName,mode==File::SnapshotSave?"ondra.osn":mode==File::TapeSave?"recording.csw":mode==File::MemorySave?"memory.bin":mode==File::Screenshot?"screenshot.ppm":mode==File::PrinterOutput?"printer.prn":mode==File::Bt100Image?"bt100.png":"");
         try { refresh(); } catch (const std::exception& e) { entries.clear(); fileError=e.what(); }
     }
     void refresh() {
@@ -262,7 +277,7 @@ struct Desktop::Impl {
         std::stable_sort(entries.begin(),entries.end(),[](const FileEntry& a,const FileEntry& b) { return a.directory && !b.directory; });
     }
     void accept(const std::string& path);
-    void drawMenu(); void drawToolbar(); void drawStatus(); void drawSettings(); void drawDebugger(); void drawKeyboard(); void drawFiles(); void drawMessages();
+    void drawMenu(); void drawToolbar(); void drawStatus(); void drawSettings(); void drawDebugger(); void drawKeyboard(); void drawFiles(); void drawMessages(); void drawPrinter();
     void draw(); void render(const std::string& capture);
 };
 
@@ -301,6 +316,8 @@ void Desktop::Impl::drawMenu() {
         if (ImGui::MenuItem("Settings...")) openSettings();
         remember("Tools.Settings");
         if (ImGui::MenuItem("Keyboard",NULL,keyboard)) keyboard=!keyboard;
+        if (ImGui::MenuItem("BT100 paper",NULL,printerWindow,m.bt100().enabled())) printerWindow=!printerWindow;
+        remember("Tools.BT100");
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -350,6 +367,7 @@ void Desktop::Impl::drawStatus() {
     ImGui::TextUnformatted(stop?"Paused":"Running"); ImGui::SameLine(); ImGui::Text("| %s | %s",m.turbo()?"4 MHz":"2 MHz",romNames[romIndex(m.romName())]);
     if (m.tape().loaded()) { ImGui::SameLine(); ImGui::SetNextItemWidth(75); ImGui::ProgressBar(static_cast<float>(m.tape().progress()),ImVec2(75,14),m.tape().finished()?"End":"Tape"); tip(tapePath.c_str()); }
     if (m.sd().enabled()) { ImGui::SameLine(); ImGui::TextUnformatted("| SD"); tip(activeSd.c_str()); }
+    if (m.printer().enabled()) { ImGui::SameLine(); ImGui::Text("| PRN: %llu",static_cast<unsigned long long>(m.printer().total())); tip(m.printer().path().c_str()); }
     if (!notice.empty()) tip(notice.c_str());
 }
 void Desktop::Impl::draw() {
@@ -374,7 +392,9 @@ void Desktop::Impl::draw() {
     ImGui::InvisibleButton("Screen",area); remember("Screen");
     if (!fullscreen) attempt([&]() { drawStatus(); });
     ImGui::End(); ImGui::PopStyleVar();
-    attempt([&]() { drawSettings(); drawDebugger(); drawKeyboard(); drawFiles(); }); drawMessages();
+    attempt([&]() { drawSettings(); drawDebugger(); drawKeyboard(); drawPrinter(); drawFiles(); });
+    if (!m.printer().error().empty() && reportedPrinterError!=m.printer().error()) { reportedPrinterError=m.printer().error(); error(reportedPrinterError); }
+    drawMessages();
 }
 void Desktop::Impl::render(const std::string& capture) {
     const auto& pixels=m.pixels();
@@ -419,6 +439,8 @@ void Desktop::Impl::accept(const std::string& path) {
     case File::SdDirectory: text(sdDirectory,friendly(path)); settingSd=true; break;
     case File::RomA: text(romA,friendly(path)); break;
     case File::RomB: text(romB,friendly(path)); break;
+    case File::PrinterOutput: text(printerDestination,friendly(path)); break;
+    case File::Bt100Image: m.bt100().savePng(path); break;
     default: break;
     }
     notice=baseName(path); file=File::None; stop=fileWasPaused;
@@ -431,8 +453,8 @@ void Desktop::Impl::drawFiles() {
     bool visible=true;
     if (ImGui::BeginPopupModal("Select file",&visible,ImGuiWindowFlags_NoSavedSettings)) {
         const bool folder=file==File::SdDirectory;
-        const bool save=file==File::TapeSave || file==File::SnapshotSave || file==File::MemorySave || file==File::Screenshot;
-        const char* title=file==File::TapeOpen?"Open tape (TAP / CSW / WAV)":file==File::TapeSave?"Record tape to CSW":file==File::SnapshotOpen?"Open OSN snapshot":file==File::SnapshotSave?"Save OSN snapshot":file==File::MemoryOpen?"Load memory block":file==File::MemorySave?"Save memory block":file==File::Screenshot?"Save emulated screen (PPM)":folder?"Select SD card directory":"Select ROM bank";
+        const bool save=file==File::TapeSave || file==File::SnapshotSave || file==File::MemorySave || file==File::Screenshot || file==File::PrinterOutput || file==File::Bt100Image;
+        const char* title=file==File::TapeOpen?"Open tape (TAP / CSW / WAV)":file==File::TapeSave?"Record tape to CSW":file==File::SnapshotOpen?"Open OSN snapshot":file==File::SnapshotSave?"Save OSN snapshot":file==File::MemoryOpen?"Load memory block":file==File::MemorySave?"Save memory block":file==File::Screenshot?"Save emulated screen (PPM)":file==File::PrinterOutput?"Centronics output (raw bytes appended to file)":file==File::Bt100Image?"Save BT100 paper (PNG image)":folder?"Select SD card directory":"Select ROM bank";
         ImGui::TextUnformatted(title); ImGui::Separator();
         if (ImGui::Button("Up")) { text(browserPath,parent(browserPath.data())); attempt([&]() { refresh(); }); } remember("File.Up");
         ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
@@ -481,10 +503,11 @@ void Desktop::Impl::drawFiles() {
         if (chosen) {
             fileError.clear();
             std::string path=folder?std::string(browserPath.data()):std::string(browserPath.data())+"/"+fileName.data();
+            if (file==File::Bt100Image && extension(path)!=".png") path+=".png";
             if (!folder && fileName[0]=='\0') fileError="Enter a file name.";
             else if (!folder && isDirectory(path)) { text(browserPath,friendly(canonical(path))); text(fileName,""); attempt([&]() { refresh(); }); }
             else if (!save && canonical(path).empty()) fileError="Select an existing file or directory.";
-            else if (save && !canonical(path).empty()) { pendingPath=path; overwrite=true; ImGui::OpenPopup("Replace file?"); }
+            else if (save && file!=File::PrinterOutput && !canonical(path).empty()) { pendingPath=path; overwrite=true; ImGui::OpenPopup("Replace file?"); }
             else { try { accept(path); } catch (const std::exception& e) { fileError=e.what(); } }
         }
         bool replace=false;
@@ -505,33 +528,66 @@ void Desktop::Impl::drawFiles() {
 
 void Desktop::Impl::drawSettings() {
     if (!settings) return;
-    dialogSize(560,530);
+    dialogSize(560,570);
     ImGui::Begin("Settings",&settings,ImGuiWindowFlags_NoCollapse);
-    ImGui::SeparatorText("ROM");
-    for (int n=0;n<6;++n) { if (n && n%2) ImGui::SameLine(260); ImGui::RadioButton(romNames[n],&rom,n); }
-    if (rom==5) {
-        ImGui::SetNextItemWidth(-55); ImGui::InputText("##romA",romA.data(),romA.size()); ImGui::SameLine(); if (ImGui::Button("A...")) open(File::RomA);
-        ImGui::SetNextItemWidth(-55); ImGui::InputText("##romB",romB.data(),romB.size()); ImGui::SameLine(); if (ImGui::Button("B...")) open(File::RomB);
-        ImGui::TextDisabled("Each ROM bank: 2, 4 or 8 KiB");
+    if (ImGui::BeginTabBar("Settings tabs")) {
+        if (ImGui::BeginTabItem("Computer")) {
+            ImGui::SeparatorText("ROM");
+            for (int n=0;n<6;++n) { if (n && n%2) ImGui::SameLine(260); ImGui::RadioButton(romNames[n],&rom,n); }
+            if (rom==5) {
+                ImGui::SetNextItemWidth(-55); ImGui::InputText("##romA",romA.data(),romA.size()); ImGui::SameLine(); if (ImGui::Button("A...")) open(File::RomA);
+                ImGui::SetNextItemWidth(-55); ImGui::InputText("##romB",romB.data(),romB.size()); ImGui::SameLine(); if (ImGui::Button("B...")) open(File::RomB);
+                ImGui::TextDisabled("Each ROM bank: 2, 4 or 8 KiB");
+            }
+            ImGui::SeparatorText("Sound and clock");
+            ImGui::Checkbox("Sound",&settingAudio); ImGui::SameLine(260);
+            if (ImGui::Checkbox("Melodik module",&settingMelodik) && settingMelodik) settingPrinter=0;
+            ImGui::Checkbox("Turbo 4 MHz",&settingTurbo);
+            ImGui::SeparatorText("Display");
+            ImGui::Checkbox("Fullscreen",&settingFull); ImGui::SameLine(260); ImGui::Checkbox("CRT scanlines",&settingScan);
+            ImGui::Checkbox("Scale2x smoothing",&settingScale2x); ImGui::SameLine(260); ImGui::SetNextItemWidth(130); ImGui::SliderInt("Zoom",&settingScale,1,4,"%dx");
+            ImGui::SeparatorText("OndraSD");
+            ImGui::Checkbox("Enable OndraSD module",&settingSd);
+            ImGui::SetNextItemWidth(-85); ImGui::InputText("##sdpath",sdDirectory.data(),sdDirectory.size()); ImGui::SameLine(); if (ImGui::Button("Browse...")) open(File::SdDirectory);
+            ImGui::Spacing(); ImGui::TextWrapped("Changing ROM or the SD card resets the computer. Sound and display changes apply without a reset.");
+            ImGui::EndTabItem();
+        }
+        const bool printersTab=ImGui::BeginTabItem("Printers"); remember("Settings.Printers");
+        if (printersTab) {
+            ImGui::TextWrapped("Printers and the Melodik module share one connector. Connecting a printer disables Melodik.");
+            ImGui::Spacing();
+            ImGui::RadioButton("No printer",&settingPrinter,0); remember("Settings.NoPrinter");
+            if (ImGui::RadioButton("Centronics printer",&settingPrinter,1)) settingMelodik=false;
+            remember("Settings.Centronics");
+            if (ImGui::RadioButton("Tesla BT100",&settingPrinter,2)) settingMelodik=false;
+            remember("Settings.BT100");
+            if (settingPrinter==1) {
+                ImGui::Spacing(); ImGui::TextUnformatted("Output file (raw bytes, appended):");
+                ImGui::SetNextItemWidth(-90); ImGui::InputText("##printerfile",printerDestination.data(),printerDestination.size()); remember("Settings.PrinterFile");
+                ImGui::SameLine(); if (ImGui::Button("Browse...")) open(File::PrinterOutput);
+                ImGui::TextWrapped("The printer accepts data at the falling STROBE edge and reports BUSY while its buffer is full.");
+            } else if (settingPrinter==2) {
+                ImGui::Spacing(); ImGui::TextWrapped("The paper window provides a power switch, paper preview and PNG export. Power on when the program requests it; powered sensors affect the Ondra keyboard.");
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
     }
-    ImGui::SeparatorText("Sound and clock");
-    ImGui::Checkbox("Sound",&settingAudio); ImGui::SameLine(260); ImGui::Checkbox("Melodik module",&settingMelodik);
-    ImGui::Checkbox("Turbo 4 MHz",&settingTurbo);
-    ImGui::SeparatorText("Display");
-    ImGui::Checkbox("Fullscreen",&settingFull); ImGui::SameLine(260); ImGui::Checkbox("CRT scanlines",&settingScan);
-    ImGui::Checkbox("Scale2x smoothing",&settingScale2x); ImGui::SameLine(260); ImGui::SetNextItemWidth(130); ImGui::SliderInt("Zoom",&settingScale,1,4,"%dx");
-    ImGui::SeparatorText("OndraSD");
-    ImGui::Checkbox("Enable OndraSD module",&settingSd);
-    ImGui::SetNextItemWidth(-85); ImGui::InputText("##sdpath",sdDirectory.data(),sdDirectory.size()); ImGui::SameLine(); if (ImGui::Button("Browse...")) open(File::SdDirectory);
-    ImGui::Spacing(); ImGui::TextWrapped("Changing ROM or the SD card resets the computer. Sound and display changes apply without a reset.");
     ImGui::Spacing();
     if (ImGui::Button("Apply",ImVec2(100,0))) attempt([&]() {
         const std::string nextSd=settingSd?std::string(sdDirectory.data()):"";
         if (settingSd && (nextSd.empty() || !isDirectory(nextSd))) throw std::runtime_error("Select an existing SD card directory.");
+        const std::string nextPrinter=settingPrinter==1?std::string(printerDestination.data()):"";
+        if (settingPrinter==1 && (nextPrinter.empty() || isDirectory(nextPrinter))) throw std::runtime_error("Select a file for Centronics output.");
         const bool changeRom=m.romName()!=romIds[rom] || (rom==5 && (activeRomA!=romA.data() || activeRomB!=romB.data()));
         if (changeRom) { if (rom==5) m.customRom(romA.data(),romB.data()); else m.selectRom(romIds[rom]); activeRomA=romA.data(); activeRomB=romB.data(); }
         if (nextSd!=activeSd) { m.sd().configure(nextSd); m.reset(false); activeSd=nextSd; }
-        audio=settingAudio; m.sound().setMelodik(settingMelodik); m.setTurbo(settingTurbo);
+        if (nextPrinter!=m.printer().path() || (settingPrinter==1 && !m.printer().enabled())) { m.printer().configure(nextPrinter); reportedPrinterError.clear(); }
+        const bool nextBt=settingPrinter==2;
+        if (nextBt && !m.bt100().enabled()) printerWindow=true;
+        if (!nextBt && m.bt100().enabled()) m.bt100().power(false,m.cycles(),m.turbo()?2:1);
+        m.bt100().configure(nextBt);
+        audio=settingAudio; m.sound().setMelodik(settingMelodik && settingPrinter==0); m.setTurbo(settingTurbo);
         scanlines=settingScan; scale2x=settingScale2x;
         if (settingFull!=fullscreen) setFullscreen(settingFull);
         if (settingScale!=static_cast<int>(scale)) resize(settingScale);
@@ -541,6 +597,40 @@ void Desktop::Impl::drawSettings() {
     if (!config.empty()) { ImGui::Spacing(); ImGui::TextDisabled("Settings: %s",friendly(config).c_str()); }
     ImGui::End();
     if (!settings) stop=settingsWasPaused;
+}
+
+void Desktop::Impl::drawPrinter() {
+    if (!printerWindow || !m.bt100().enabled()) return;
+    auto& printer=m.bt100(); printer.advance(m.cycles(),m.turbo()?2:1);
+    dialogSize(700,440);
+    ImGui::Begin("Tesla BT100 - paper",&printerWindow,ImGuiWindowFlags_NoCollapse);
+    if (ImGui::Button(printer.powered()?"Power off":"Power on")) printer.power(!printer.powered(),m.cycles(),m.turbo()?2:1);
+    remember("Printer.Power"); tip("Power on only when ready to print: BT100 sensors share the keyboard lines.");
+    ImGui::SameLine(); if (ImGui::Button("Save PNG...")) open(File::Bt100Image); remember("Printer.Save");
+    ImGui::SameLine(); if (ImGui::Button("New paper")) { printer.newPaper(); lastPaperRow=-1; } remember("Printer.New");
+    ImGui::SameLine(); ImGui::Checkbox("Follow print",&followPrinter);
+    ImGui::Text("%s | Row: %u | Carriage: %.1f",printer.powered()?"On":"Off",printer.row(),printer.carriage());
+    ImGui::SameLine(); ImGui::SetNextItemWidth(100); ImGui::SliderInt("Zoom",&paperZoom,1,3,"%dx");
+    if (printer.paperFull()) ImGui::TextColored(ImVec4(0.75f,0.1f,0.1f,1),"Paper full. Save it and insert new paper to continue.");
+    ImGui::BeginChild("Paper",ImVec2(0,0),ImGuiChildFlags_Borders,ImGuiWindowFlags_HorizontalScrollbar);
+    const auto cursor=ImGui::GetCursorScreenPos(); const ImVec2 origin(cursor.x+12,cursor.y+12);
+    const float localY=ImGui::GetCursorPosY()+12,zoom=static_cast<float>(paperZoom);
+    const unsigned rows=std::max(300u,printer.paperRows());
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->AddRectFilled(origin,ImVec2(origin.x+Bt100::Width*zoom,origin.y+rows*zoom),IM_COL32(250,248,238,255));
+    const unsigned first=static_cast<unsigned>(std::max(0.0f,std::floor((ImGui::GetScrollY()-12)/zoom)));
+    const unsigned last=std::min(rows,first+static_cast<unsigned>(ImGui::GetWindowHeight()/zoom)+3);
+    for (unsigned row=first;row<last;++row) for (unsigned col=0;col<Bt100::Width;++col) if (printer.dot(row,col)) {
+        const ImVec2 point(origin.x+col*zoom,origin.y+row*zoom);
+        draw->AddRectFilled(point,ImVec2(point.x+zoom,point.y+zoom),IM_COL32(40,40,60,255));
+    }
+    const float headX=origin.x+static_cast<float>(printer.carriage())*zoom,headY=origin.y+printer.row()*zoom;
+    draw->AddRect(ImVec2(headX-3,headY-6),ImVec2(headX+4,headY+8),IM_COL32(210,40,40,255));
+    draw->AddLine(ImVec2(origin.x,headY+zoom+1),ImVec2(origin.x+Bt100::Width*zoom,headY+zoom+1),IM_COL32(230,50,50,70));
+    ImGui::Dummy(ImVec2(Bt100::Width*zoom+24,rows*zoom+24));
+    if (followPrinter && lastPaperRow!=static_cast<int>(printer.row())) ImGui::SetScrollFromPosY(localY+printer.row()*zoom,0.5f);
+    lastPaperRow=static_cast<int>(printer.row());
+    ImGui::EndChild(); ImGui::End();
 }
 
 void Desktop::Impl::drawMessages() {

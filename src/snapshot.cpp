@@ -55,5 +55,6 @@ void Machine::loadSnapshot(const std::string& path) {
     a0_ = data[34]; a1_ = data[35]; a3_ = data[36];
     releaseKeys(); sound_.reset(); sound_.speaker(a0_ >> 5);
     tape_.setMotor((a0_ & 16) != 0); tape_.recordLevel((a3_ & 8) != 0); sd_.reset(0);
+    printer_.reset(0); bt100_.reset(0);
 }
 }

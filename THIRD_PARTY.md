@@ -16,6 +16,10 @@
   text je zachován v `assets/roms/LICENSE-PLUS`.
 - Z Java implementace jsou odvozeny mapování a časování počítače, adresování
   obrazu, matice klávesnice, převod TAP, formát OSN a protokol OndraSD.
+- Centronics a Tesla BT100 jsou převedené z `machine/Printer.java`,
+  `machine/BT100.java` a jejich zapojení v revizi
+  `7aad67efd76badfa6b82835bd1285aa7c9bedeb1` (GPLv3). Zachovávají výchozí
+  časování, polaritu snímačů, dráhu vozíku a korekci zpětného chodu.
 - Java CPU, Swing UI ani `machine/SN76489.java` nejsou součástí tohoto portu.
   Poslední z těchto souborů má vlastní nekomerční licenci; zdejší `Psg` je nová
   implementace hardwarových registrů a čítačů, nepřebírá jeho implementaci.

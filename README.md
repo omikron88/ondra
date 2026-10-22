@@ -12,6 +12,8 @@ Grafické rozhraní navazuje na původní JOndru: menu, lišta s původními iko
 LED, ovládání pásky, dialog nastavení a debugger. Používá staticky připojené
 Dear ImGui nad SDL2; font i obrázky jsou součástí programu.
 
+Verze 0.2.0 doplňuje tiskárny Centronics a Tesla BT100 podle současné JOndry.
+
 ## Sestavení v Linuxu
 
 Na Debianu/Ubuntu:
@@ -182,6 +184,53 @@ kombinací Numbers s příslušnou klávesou Ondry. Joystick používá numerick
 klávesnici 8/2/4/6 a 0 jako tlačítko. Při ztrátě fokusu se stisky uvolní.
 Zelená/žlutá LED a stav motoru pásky jsou vidět ve spodní liště.
 
+## Tiskárny
+
+V **Tools → Settings → Printers** vyberte **Centronics printer** nebo
+**Tesla BT100** a potvrďte **Apply**. Tiskárny a Melodik používají stejný
+konektor, proto lze připojit vždy jen jedno z těchto zařízení. Výběr i cesta
+k souboru se ukládají do `ondra.ini`.
+
+**Centronics** přebírá bajt z portu 9 na sestupné hraně STROBE (bit 3 portu
+0Ah). Přijatá data připisuje beze změn na konec vybraného souboru; stávající
+obsah zachová. Výstup obsahuje i řídicí a grafické kódy, nejde o převod na PDF
+nebo tisk na systémovou tiskárnu. Emulovaný buffer má 2 KiB, rychlost 200
+znaků/s a signál BUSY na bitu 5 v I/O okně, včetně adresy E00Fh. Po každém
+bajtu BUSY trvá nejméně 100 µs; plný buffer čekání prodlouží.
+
+**BT100** otevře okno **Tesla BT100 - paper** s vypínačem, náhledem papíru,
+polohou hlavy, sledováním tisku, zvětšením, **New paper** a **Save PNG...**.
+Zavřené okno lze otevřít přes **Tools → BT100 paper**. Připojení v nastavení
+nebo obnovení nastavení po spuštění nechává fyzický vypínač vypnutý. Zapněte jej
+až ve chvíli, kdy tiskový program požádá o zapnutí tiskárny, a po tisku vypněte:
+její snímače jsou propojené s klávesnicí Ondry a za chodu ovlivňují stisky.
+Zavření okna samo o sobě vypínač nevypíná.
+
+![Papír tiskárny Tesla BT100](docs/bt100.png)
+
+BT100 zachovává aktivně nízké výstupy na portu 9 (jehla, oba směry vozíku,
+posun papíru), snímače na E009h i jejich vliv na řádky klávesnice. Model má
+dráhu −0,75 až 526 bodů, 2ms krok vozíku, 1,5ms rozjezd, 5ms posun papíru
+a dvoubodovou korekci při tisku vlevo. Používá výchozí synchronizační okénka
+Java modelu. Náhled má šířku 600 bodů; export je černobílé PNG ve zvětšení 2×.
+Papír pojme 100 000 řádků bodů; při zaplnění jej uložte a vložte nový.
+
+Z příkazové řádky:
+
+```sh
+./build/ondra --no-config --printer tisk.prn
+./build/ondra --no-config --bt100
+./build/ondra-headless --bt100-output papir.png --raw program.bin \
+  --address 0x4000 --pc 0x4000 --load-after 0 --frames 5000
+```
+
+`--bt100` a `--bt100-output` tiskárnu také zapnou, takže lze tisknout bez
+grafického okna. `--bt100-output` uloží papír při ukončení; přípona je PNG.
+Současné zadání tiskárny a `--melodik` skončí chybou. Časování tiskáren zůstává
+v reálném čase také v turbu. Reset počítače vyprázdní handshake a zastaví
+motory, vytištěný papír a data v souboru zachová. Historický formát OSN stav
+tiskáren neukládá.
+
 ## Testování a terminálový debugger
 
 Jádro lze sestavit samostatně, bez SDL2 a bez grafického prostředí:
@@ -205,6 +254,13 @@ události myši a klávesnice: pauza, nastavení, krokování, editace registrů
 a breakpointů, uložení/načtení snapshotu s českým názvem a zotavení po chybě.
 Kontrolují také potvrzení přepsání souboru, BIN dialogy a přednost parametrů
 před uloženými nastaveními.
+
+Test `printers` spouští skutečný Z80 ovladač Centronics s čekáním na BUSY,
+ověřuje binární připisování, buffer, turbo, chyby souborů, snímače BT100,
+polaritu, vůli a zachování papíru při resetu. Výsledky šestnácti střídavých
+přejezdů BT100 (snímače a všechny body papíru) porovnává s nezměněnou Java
+implementací. Grafický test navíc ověřuje připojení tiskárny, vypnutí Melodiku,
+vypínač BT100, nový papír a export PNG přes skutečné události myši a klávesnice.
 
 Příkazy debuggeru (adresy jsou desetinné nebo s prefixem `0x`/`$`):
 

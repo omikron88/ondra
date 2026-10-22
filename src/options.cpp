@@ -56,6 +56,9 @@ Options parseOptions(int argc, char** argv) {
         else if (arg == "--save-snapshot") o.saveSnapshot = value();
         else if (arg == "--screenshot") o.screenshot = value();
         else if (arg == "--sd") o.sd = value();
+        else if (arg == "--printer") o.printer = value();
+        else if (arg == "--bt100") o.bt100 = o.bt100Power = true;
+        else if (arg == "--bt100-output") { o.bt100Output = value(); o.bt100 = o.bt100Power = true; }
         else if (arg == "--config") o.config = value();
         else if (arg == "--no-config") o.noConfig = true;
         else if (arg == "--ui-screenshot") o.uiScreenshot = value();
@@ -70,6 +73,8 @@ Options parseOptions(int argc, char** argv) {
         else throw std::runtime_error("Unknown option: " + arg);
     }
     if (o.romA.empty() != o.romB.empty()) throw std::runtime_error("Use --rom-a and --rom-b together");
+    if (unsigned(o.melodik)+unsigned(!o.printer.empty())+unsigned(o.bt100)>1)
+        throw std::runtime_error("Melodik, Centronics and BT100 share one port; choose only one");
     if (!o.load.empty() && o.frames && o.loadAfter >= o.frames) throw std::runtime_error("--load-after must be less than --frames");
     return o;
 }
@@ -77,6 +82,8 @@ void configure(Machine& m, const Options& o) {
     m.selectRom(o.rom);
     if (!o.romA.empty()) m.customRom(o.romA, o.romB);
     m.setTurbo(o.turbo); m.sound().setMelodik(o.melodik);
+    m.printer().configure(o.printer); m.bt100().configure(o.bt100);
+    m.bt100().power(o.bt100Power,m.cycles(),m.turbo()?2:1);
     if (!o.sd.empty()) m.sd().configure(o.sd);
     if (!o.snapshot.empty()) m.loadSnapshot(o.snapshot);
     if (!o.tape.empty()) m.tape().load(o.tape);
@@ -92,6 +99,8 @@ void finish(Machine& m, const Options& o) {
     if (!o.saveSnapshot.empty()) m.saveSnapshot(o.saveSnapshot);
     if (!o.record.empty()) m.tape().saveRecording(o.record);
     if (!o.screenshot.empty()) m.screenshot(o.screenshot);
+    m.printer().flush();
+    if (!o.bt100Output.empty()) { m.bt100().advance(m.cycles(),m.turbo()?2:1); m.bt100().savePng(o.bt100Output); }
 }
 void printRegisters(const Machine& m) {
     const Z80& c = m.cpu();
@@ -114,6 +123,10 @@ void printHelp() {
         "  --tape FILE                play Ondra TAP, CSW RLE or mono PCM WAV\n"
         "  --record FILE.csw          record tape output; saved on exit\n"
         "  --sd DIRECTORY             enable OndraSD + RTC\n"
+        "  --printer FILE             append raw Centronics printer output\n"
+        "  --bt100                    connect and power on Tesla BT100\n"
+        "  --bt100-output FILE.png    power on BT100 and save paper on exit\n"
+        "                            (printers and Melodik share one port)\n"
         "  --snapshot FILE.osn        load JOndra OSN v1/v2\n"
         "  --save-snapshot FILE.osn   save OSN v2 on exit\n"
         "  --screenshot FILE.ppm      save the last framebuffer\n"

@@ -44,6 +44,13 @@ int main(int argc,char** argv) {
         check(restored.rom=="tesla" && restored.scale==2,"Saved preferences overrode explicit command line options");
         restored.noConfig=true; restored.rom="basic"; restored.explicitOptions.clear(); ondra::Desktop::restorePreferences(restored);
         check(restored.rom=="basic","--no-config still loaded saved preferences");
+        const std::string printerSettings="printerDevice=bt100\nmelodik=1\n";
+        ondra::writeFile(config.path,std::vector<std::uint8_t>(printerSettings.begin(),printerSettings.end()));
+        ondra::Options restoredPrinter; restoredPrinter.config=config.path; ondra::Desktop::restorePreferences(restoredPrinter);
+        check(restoredPrinter.bt100 && !restoredPrinter.bt100Power && !restoredPrinter.melodik,"Restored BT100 must start off and exclude Melodik");
+        ondra::Options overridePrinter; overridePrinter.config=config.path; overridePrinter.melodik=true; overridePrinter.explicitOptions.insert("--melodik");
+        ondra::Desktop::restorePreferences(overridePrinter);
+        check(overridePrinter.melodik && !overridePrinter.bt100,"Saved BT100 overrode explicit Melodik selection");
         for (unsigned n=0;n<150;++n) machine.runFrame();
         ondra::Options options; options.noConfig=true; options.mute=true;
         ondra::Desktop ui(sdl.window,sdl.renderer,machine,options);
@@ -116,10 +123,27 @@ int main(int argc,char** argv) {
         check(machine.ram()[0x5000]==0x5a,"Invalid snapshot changed RAM");
         click("File.Cancel"); frame();
         float x,y,w,h; check(!ui.widgetBounds("File.Accept",x,y,w,h),"Cancel left the file dialog open");
+        File printerFile("ui-prn-\xc5\xbe-"+std::to_string(SDL_GetTicks()%100000)+".prn");
+        machine.sound().setMelodik(true);
+        click("Settings"); click("Settings.Printers"); click("Settings.Centronics");
+        input("Settings.PrinterFile",printerFile.path); click("Settings.Apply");
+        check(machine.printer().enabled() && !machine.sound().melodik() && !machine.bt100().enabled(),"Selecting Centronics did not disconnect Melodik");
+        machine.output(0x0a,8); machine.output(9,'A'); machine.output(0x0a,0);
+        check(ondra::readFile(printerFile.path)==std::vector<std::uint8_t>({'A'}),"Centronics UI destination did not receive printer data");
+        click("Settings"); click("Settings.Printers"); click("Settings.BT100"); click("Settings.Apply");
+        check(machine.bt100().enabled() && !machine.bt100().powered() && !machine.printer().enabled(),"BT100 connection/power state is wrong");
+        click("Printer.Power"); check(machine.bt100().powered(),"BT100 power button failed");
+        machine.output(9,255); machine.output(9,254); check(machine.bt100().dot(0,0),"BT100 did not strike paper");
+        File paper("ui-paper-"+std::to_string(SDL_GetTicks())+".png");
+        click("Printer.Save"); input("File.Name",paper.path); click("File.Accept");
+        const auto png=ondra::readFile(paper.path);
+        check(png.size()>32 && png[0]==137 && png[1]=='P' && png[2]=='N' && png[3]=='G',"BT100 PNG export failed");
+        click("Printer.New"); check(!machine.bt100().dot(0,0) && machine.bt100().row()==0,"BT100 new paper did not clear output");
+        click("Printer.Power"); check(!machine.bt100().powered(),"BT100 power off failed");
         key(SDL_SCANCODE_F6,SDLK_F6,true,KMOD_NONE); key(SDL_SCANCODE_F6,SDLK_F6,false,KMOD_NONE);
         check(machine.turbo(),"Turbo keyboard shortcut failed");
         SDL_Event quit={}; quit.type=SDL_QUIT; ui.event(quit); check(!ui.running(),"Quit event did not stop desktop");
-        std::cout<<"PASS UI: preferences, pause/run, settings/input capture, debugger step/step-over, register/memory/breakpoint edits, UTF-8 snapshot save/load, overwrite confirmation, BIN save/load, invalid-file recovery, cancel, turbo, quit\n";
+        std::cout<<"PASS UI: preferences, pause/run, settings/input capture, debugger step/step-over, register/memory/breakpoint edits, UTF-8 snapshot save/load, overwrite confirmation, BIN save/load, invalid-file recovery, printers/PNG/paper/power, cancel, turbo, quit\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<"FAIL UI: "<<e.what()<<'\n'; return 1; }
 }

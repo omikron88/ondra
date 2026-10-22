@@ -3,6 +3,7 @@
 #include <ondra/sound.hpp>
 #include <ondra/tape.hpp>
 #include <ondra/sdcard.hpp>
+#include <ondra/printer.hpp>
 #include <Z80.h>
 #include <array>
 #include <cstdint>
@@ -31,7 +32,7 @@ public:
     void releaseKeys() { keys_.fill(255); }
     bool runFrame(); // false = execution breakpoint hit, frame remains resumable
     unsigned step();
-    void setTurbo(bool enabled) { multiplier_ = enabled ? 2 : 1; }
+    void setTurbo(bool enabled);
     bool turbo() const { return multiplier_ == 2; }
     const std::vector<std::uint32_t>& pixels();
     void screenshot(const std::string& path);
@@ -48,6 +49,8 @@ public:
     Tape& tape() { return tape_; }
     Sound& sound() { return sound_; }
     SdCard& sd() { return sd_; }
+    Printer& printer() { return printer_; }
+    Bt100& bt100() { return bt100_; }
     std::set<std::uint16_t>& breakpoints() { return breakpoints_; }
     std::uint64_t cycles() const { return cycles_; }
     unsigned resolution() const { return resolution_; }
@@ -72,6 +75,8 @@ private:
     Tape tape_;
     Sound sound_;
     SdCard sd_;
+    Printer printer_;
+    Bt100 bt100_;
     std::set<std::uint16_t> breakpoints_;
     std::vector<std::uint32_t> pixels_;
     std::uint64_t cycles_, frameStart_;

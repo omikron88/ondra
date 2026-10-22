@@ -72,7 +72,12 @@ void Machine::reset(bool clearRam) {
     releaseKeys();
     a0_ = a1_ = a3_ = 0; cycles_ = frameStart_ = 0;
     resolution_ = 255; cycleDebt_ = 0; frameActive_ = false;
-    tape_.setMotor(false); sound_.reset(); sd_.reset(0);
+    tape_.setMotor(false); sound_.reset(); sd_.reset(0); printer_.reset(0); bt100_.reset(0);
+}
+void Machine::setTurbo(bool enabled) {
+    const unsigned next=enabled?2:1;
+    printer_.changeSpeed(cycles_,multiplier_,next); bt100_.changeSpeed(cycles_,multiplier_,next);
+    multiplier_=next;
 }
 zuint8 Machine::cpuRead(void* p, zuint16 a) { return static_cast<Machine*>(p)->read(a); }
 void Machine::cpuWrite(void* p, zuint16 a, zuint8 v) { static_cast<Machine*>(p)->write(a, v); }
@@ -85,6 +90,11 @@ std::uint8_t Machine::read(std::uint16_t a) {
         if (tape_.loaded()) v = static_cast<std::uint8_t>((v & 127) | (tape_.level() ? 128 : 0));
         if (sound_.melodik() && (a & 255) == 15) v &= ~32;
         if (sd_.enabled()) v = static_cast<std::uint8_t>((v & ~64) | (sd_.rxLevel(cycles_) ? 64 : 0));
+        if (bt100_.enabled()) {
+            if ((a&255)==9) v=static_cast<std::uint8_t>((v&0xf0)|bt100_.sensorLines(cycles_,multiplier_));
+            else if ((a&255)<9) v=static_cast<std::uint8_t>(v&(0xf0|bt100_.sensorLines(cycles_,multiplier_)));
+        }
+        if (printer_.enabled()) v=static_cast<std::uint8_t>((v&~32)|(printer_.busy(cycles_)?32:0));
         return v;
     }
     return ram_[a];
@@ -104,12 +114,14 @@ void Machine::output(std::uint16_t port, std::uint8_t value) {
     sound_.advance(frameActive_ ? cycles_ - frameStart_ : 0, multiplier_);
     if (!(port & 8)) { a3_ = value; tape_.recordLevel((value & 8) != 0); }
     if (!(port & 1)) {
+        if ((a0_&8) && !(value&8)) printer_.strobe(a1_,cycles_,multiplier_);
         a0_ = value; sd_.txWrite((value >> 2) & 1, cycles_);
         sound_.speaker(value >> 5); tape_.setMotor((value & 16) != 0);
     }
     if (!(port & 2)) {
         a1_ = value;
-        if ((a0_ & 8) && sound_.melodik()) sound_.psgWrite(value);
+        bt100_.write(value,cycles_,multiplier_);
+        if ((a0_ & 8) && sound_.melodik() && !printer_.enabled() && !bt100_.enabled()) sound_.psgWrite(value);
     }
 }
 void Machine::key(unsigned row, unsigned bit, bool down) {
@@ -150,7 +162,7 @@ bool Machine::runFrame() {
     }
     z80_int(&cpu_, 0);
     cycleDebt_ = static_cast<unsigned>(cycles_ - frameStart_ + cycleDebt_ - frameTarget_);
-    sound_.finishFrame(); frameActive_ = false;
+    sound_.finishFrame(); bt100_.advance(cycles_,multiplier_); frameActive_ = false;
     return true;
 }
 const std::vector<std::uint32_t>& Machine::pixels() {
