@@ -52,7 +52,7 @@ int main(int argc,char** argv) {
         ondra::Desktop::restorePreferences(overridePrinter);
         check(overridePrinter.melodik && !overridePrinter.bt100,"Saved BT100 overrode explicit Melodik selection");
         for (unsigned n=0;n<150;++n) machine.runFrame();
-        ondra::Options options; options.noConfig=true; options.mute=true;
+        ondra::Options options; options.config=config.path; options.mute=true;
         ondra::Desktop ui(sdl.window,sdl.renderer,machine,options);
         const auto window=SDL_GetWindowID(sdl.window);
         auto frame=[&]() { SDL_PumpEvents(); ui.draw(); ui.render(); };
@@ -73,6 +73,11 @@ int main(int argc,char** argv) {
             check(value.size()<sizeof(e.text.text),"Test input too long"); std::snprintf(e.text.text,sizeof(e.text.text),"%s",value.c_str()); ui.event(e); frame();
         };
         frame(); frame();
+        const ondra::Ds1307::Registers stopped={{0xd9,0x58,0x71,7,0x31,0x12,0x26}};
+        machine.sd().rtc().write(stopped); frame();
+        ondra::Options rtcOptions; rtcOptions.config=config.path; ondra::Desktop::restorePreferences(rtcOptions);
+        ondra::Ds1307 restoredClock;
+        check(restoredClock.restore(rtcOptions.sdRtc) && restoredClock.read()==stopped,"GUI did not persist RTC register changes");
         click("Pause"); check(ui.paused(),"Pause toolbar button did not pause");
         click("Pause"); check(!ui.paused(),"Pause toolbar button did not resume");
         click("Settings"); check(ui.paused() && ui.capturesKeyboard(),"Settings did not pause and capture input");

@@ -24,13 +24,11 @@ std::string clean(const std::string& s) {
 std::string fatName(std::string base, std::string ext) {
     base.resize(8, ' '); ext.resize(3, ' '); return base + ext;
 }
-unsigned bcd(unsigned v) { return (v / 10) * 16 + v % 10; }
-unsigned unbcd(unsigned v) { return (v >> 4) * 10 + (v & 15); }
 }
 SdCard::Time SdCard::Tx::end() const { return start + static_cast<Time>(std::ceil(10 * bit)); }
 SdCard::SdCard() : frameClock_(0), frameReal_(0), nextBroadcast_(0), free_(0), lastEnd_(0), rxStart_(0), pendingTime_(0),
     multiplier_(1), baud_(9600), delay_(0xc0), txLine_(0), rxBit_(0), rxShift_(0), command_(-1), pending_(-1),
-    frameStarted_(false), broadcast_(false), waitHigh_(false), rxActive_(false), rxBitTime_(0), rtcOffset_(0) {}
+    frameStarted_(false), broadcast_(false), waitHigh_(false), rxActive_(false), rxBitTime_(0) {}
 void SdCard::configure(const std::string& root) {
     const std::string path = root.empty() ? "" : canonical(root);
     if (!root.empty() && (path.empty() || !isDirectory(path))) throw std::runtime_error("SD directory does not exist: " + root);
@@ -138,8 +136,8 @@ void SdCard::process(unsigned value, Time t) {
         if (n == 11) {
             const int cmd = command_; command_ = -1;
             const std::string name(params_.begin(), params_.end());
-            if (cmd == 'C') changeDirectory(name);
-            else { const std::string file = find(current_, name, false); if (!file.empty()) sendFile(file, t + 4000, name[8] == 'T'); }
+            if (cmd == 'C') { if (name[0]!='/') search(name,t); changeDirectory(name); }
+            else { const std::string file = find(current_, name, false); const Time end=search(name,t); if (!file.empty()) sendFile(file, end, name[8] == 'T'); }
         }
         break;
     default: command_ = -1; break;
@@ -159,6 +157,13 @@ void SdCard::sendFile(const std::string& path, Time t, bool tap) {
         if (!tap || !skip) send(data[i], t);
         if (tap && --count == 0) { skip = !skip; count = skip ? 27 : 1024; }
     }
+    if (!tap) pause(3000);
+}
+SdCard::Time SdCard::search(const std::string& name,Time time) {
+    unsigned count=0;
+    for (const auto& entry:list(current_)) { ++count; if (entry.fat==name) break; }
+    const Time end=time+4000+static_cast<Time>(count*1500.0*Cycle8051);
+    free_=std::max(free_,end); return end;
 }
 std::vector<SdCard::Entry> SdCard::list(const std::string& path) const {
     std::vector<Entry> entries;
@@ -199,30 +204,21 @@ void SdCard::sendDirectory(Time t) {
     for (const Entry& e : list(current_)) {
         if (!e.dir && (e.size >= 65536 || (e.fat.substr(8) != "BIN" && e.fat.substr(8) != "TAP"))) continue;
         for (unsigned char c : e.fat) send(c, t);
-        send(e.dir ? 0x50 : 0x60, t); send(0, t); pause(1500);
+        send(e.dir ? 0x51 : 0x71, t); send(0, t); pause(1500);
     }
     send(255, t);
+    pause(3000);
 }
 void SdCard::changeDirectory(const std::string& name) {
     if (name[0] == '/') current_ = root_;
     else { const std::string path = find(current_, name, true); if (!path.empty()) current_ = path; }
 }
 void SdCard::sendRtc(Time t) {
-    const std::time_t now = std::time(NULL) + rtcOffset_;
-    const std::tm* p = std::localtime(&now);
-    if (!p) return;
-    const std::tm d = *p;
-    const unsigned values[] = {bcd(d.tm_sec), bcd(d.tm_min), bcd(d.tm_hour), static_cast<unsigned>(d.tm_wday ? d.tm_wday : 7), bcd(d.tm_mday), bcd(d.tm_mon + 1), bcd((d.tm_year + 1900) % 100)};
-    for (unsigned v : values) send(v, t + 1000);
+    for (auto value:rtc_.read()) send(value,t+1000);
 }
 void SdCard::setRtc() {
-    std::tm d = {};
-    d.tm_year = static_cast<int>(unbcd(params_[6])) + 100;
-    d.tm_mon = static_cast<int>(unbcd(params_[5])) - 1; d.tm_mday = static_cast<int>(unbcd(params_[4]));
-    d.tm_hour = static_cast<int>(unbcd(params_[2] & 63)); d.tm_min = static_cast<int>(unbcd(params_[1]));
-    d.tm_sec = static_cast<int>(unbcd(params_[0] & 127)); d.tm_isdst = -1;
-    if (d.tm_mon < 0 || d.tm_mon > 11 || d.tm_mday < 1 || d.tm_mday > 31 || d.tm_hour > 23 || d.tm_min > 59 || d.tm_sec > 59) return;
-    const std::time_t value = std::mktime(&d);
-    if (value != static_cast<std::time_t>(-1)) rtcOffset_ = value - std::time(NULL);
+    Ds1307::Registers values;
+    for (unsigned n=0;n<values.size();++n) values[n]=static_cast<std::uint8_t>(params_[n]);
+    rtc_.write(values);
 }
 }

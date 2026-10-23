@@ -74,6 +74,7 @@ void bt100() {
     ondra::Machine m; m.output(3,6); m.bt100().configure(true);
     CHECK((m.read(0xe009)&15)==15); m.bt100().power(true,0,1);
     CHECK((m.read(0xe009)&15)==12); CHECK((m.read(0xff00)&15)==12); CHECK((m.read(0xe00f)&15)==15);
+    for (unsigned a=0xe000;a<=0xffff;++a) CHECK(m.read(a)==m.read(0xe000+(a&15)));
     m.key(0,3,true); CHECK((m.read(0xe000)&15)==4);
     m.key(9,2,true); CHECK((m.read(0xe009)&15)==12); // Joystick row is replaced by sensors.
     m.output(0x19,0xfe); CHECK(m.bt100().dot(0,0));

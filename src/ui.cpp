@@ -91,6 +91,7 @@ void Desktop::restorePreferences(Options& options) {
         } else if (romIndex(rom)<5 && std::string(romIds[romIndex(rom)])==rom) options.rom=rom;
     }
     if (!args.count("--sd")) { const auto path=get("sd",""); if (!path.empty() && isDirectory(path)) options.sd=path; }
+    options.sdRtc=get("sdRtc",get("SDRTC",""));
     if (!args.count("--turbo")) options.turbo=get("turbo",options.turbo?"1":"0")=="1";
     if (!args.count("--melodik") && !args.count("--printer") && !args.count("--bt100") && !args.count("--bt100-output")) {
         const auto device=get("printerDevice",get("melodik",options.melodik?"1":"0")=="1"?"melodik":"none");
@@ -114,6 +115,7 @@ struct Desktop::Impl {
     bool printerWindow=false,followPrinter=true;
     int paperZoom=1,lastPaperRow=-1,settingPrinter=0;
     Path printerDestination={}; std::string reportedPrinterError;
+    std::uint64_t savedRtcRevision=0;
     unsigned scale=2; int rom=0;
     Path romA={},romB={},sdDirectory={}; std::string activeSd,activeRomA,activeRomB;
     bool settingAudio=true,settingMelodik=false,settingTurbo=false,settingFull=false,settingScan=false,settingScale2x=false,settingSd=false;
@@ -137,6 +139,7 @@ struct Desktop::Impl {
     Impl(SDL_Window* w,SDL_Renderer* r,Machine& machine,const Options& o):window(w),renderer(r),m(machine),options(o) {
         audio=!o.mute; scale=o.scale; activeSd=o.sd; activeRomA=o.romA; activeRomB=o.romB;
         tapePath=o.tape; recordPath=o.record; config=configPath(o);
+        savedRtcRevision=m.sd().rtc().revision();
         const auto saved=preferences(o);
         auto flag=[&](const char* name) { const auto p=saved.find(name); return p!=saved.end() && p->second=="1"; };
         scanlines=flag("scanlines"); scale2x=flag("scale2x");
@@ -203,6 +206,7 @@ struct Desktop::Impl {
         if (config.empty()) return;
         std::map<std::string,std::string> values;
         values["rom"]=m.romName(); values["romA"]=activeRomA; values["romB"]=activeRomB; values["sd"]=activeSd;
+        values["sdRtc"]=m.sd().rtc().state();
         values["sound"]=audio?"1":"0"; values["melodik"]=m.sound().melodik()?"1":"0";
         values["printerDevice"]=m.printer().enabled()?"centronics":m.bt100().enabled()?"bt100":m.sound().melodik()?"melodik":"none";
         values["printerFile"]=printerDestination.data();
@@ -364,11 +368,11 @@ void Desktop::Impl::drawStatus() {
     led("green",!(m.portA0()&1),"Green LED"); led("yellow",!(m.portA0()&2),"Yellow LED"); led("tape",m.tape().motor(),"Tape motor");
     if (button("Record",m.tape().recording()?"player_rec":"player_play","Play / Record",m.tape().recording())) record();
     ImGui::SameLine();
-    ImGui::TextUnformatted(stop?"Paused":"Running"); ImGui::SameLine(); ImGui::Text("| %s | %s",m.turbo()?"4 MHz":"2 MHz",romNames[romIndex(m.romName())]);
+    ImGui::TextUnformatted(stop?"Paused":"Running"); if (!notice.empty()) tip(notice.c_str());
+    ImGui::SameLine(); ImGui::Text("| %s | %s",m.turbo()?"4 MHz":"2 MHz",romNames[romIndex(m.romName())]);
     if (m.tape().loaded()) { ImGui::SameLine(); ImGui::SetNextItemWidth(75); ImGui::ProgressBar(static_cast<float>(m.tape().progress()),ImVec2(75,14),m.tape().finished()?"End":"Tape"); tip(tapePath.c_str()); }
-    if (m.sd().enabled()) { ImGui::SameLine(); ImGui::TextUnformatted("| SD"); tip(activeSd.c_str()); }
+    if (m.sd().enabled()) { ImGui::SameLine(); ImGui::TextUnformatted("| SD"); tip((activeSd+"\nRTC: "+m.sd().rtc().text()).c_str()); }
     if (m.printer().enabled()) { ImGui::SameLine(); ImGui::Text("| PRN: %llu",static_cast<unsigned long long>(m.printer().total())); tip(m.printer().path().c_str()); }
-    if (!notice.empty()) tip(notice.c_str());
 }
 void Desktop::Impl::draw() {
     ImGui_ImplSDLRenderer2_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame(); bounds.clear(); virtualKeys.clear();
@@ -397,6 +401,7 @@ void Desktop::Impl::draw() {
     drawMessages();
 }
 void Desktop::Impl::render(const std::string& capture) {
+    if (m.sd().rtc().revision()!=savedRtcRevision) { savedRtcRevision=m.sd().rtc().revision(); savePreferences(); }
     const auto& pixels=m.pixels();
     if (renderTexture==scaled) {
         for (unsigned y=0;y<256;++y) for (unsigned x=0;x<320;++x) {

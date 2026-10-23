@@ -4,6 +4,7 @@
 #include <iostream>
 #include <iomanip>
 #include <stdexcept>
+#include <sstream>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -13,6 +14,28 @@
 #endif
 
 namespace ondra {
+namespace {
+bool rtcSetting(const std::string& line) { return line.compare(0,6,"sdRtc=")==0 || line.compare(0,6,"SDRTC=")==0; }
+std::string readRtcState(const std::string& path) {
+    try {
+        if (canonical(path).empty()) return "";
+        const auto data=readFile(path,128*1024); std::istringstream lines(std::string(data.begin(),data.end())); std::string line;
+        while (std::getline(lines,line)) if (rtcSetting(line)) {
+            if (!line.empty() && line.back()=='\r') line.pop_back();
+            return line.substr(6);
+        }
+    } catch (const std::exception&) { /* Unreadable preferences must not prevent startup. */ }
+    return "";
+}
+void writeRtcState(const std::string& path,const std::string& state) {
+    std::string result,line;
+    if (!canonical(path).empty()) {
+        const auto data=readFile(path,128*1024); std::istringstream lines(std::string(data.begin(),data.end()));
+        while (std::getline(lines,line)) if (!rtcSetting(line)) result+=line+'\n';
+    }
+    result+="sdRtc="+state+'\n'; writeFile(path,std::vector<std::uint8_t>(result.begin(),result.end()));
+}
+}
 unsigned number(const std::string& text, unsigned maximum) {
     std::size_t used = 0; unsigned long value;
     if (text.empty() || text[0] == '-') throw std::runtime_error("Invalid number: " + text);
@@ -85,6 +108,10 @@ void configure(Machine& m, const Options& o) {
     m.printer().configure(o.printer); m.bt100().configure(o.bt100);
     m.bt100().power(o.bt100Power,m.cycles(),m.turbo()?2:1);
     if (!o.sd.empty()) m.sd().configure(o.sd);
+    if (!o.noConfig) {
+        const auto state=!o.sdRtc.empty()?o.sdRtc:!o.config.empty()?readRtcState(o.config):"";
+        if (!state.empty()) m.sd().rtc().restore(state);
+    }
     if (!o.snapshot.empty()) m.loadSnapshot(o.snapshot);
     if (!o.tape.empty()) m.tape().load(o.tape);
     if (!o.record.empty()) m.tape().startRecording();
@@ -96,6 +123,7 @@ void loadProgram(Machine& m, const Options& o) {
     if (o.pc >= 0) m.jump(static_cast<std::uint16_t>(o.pc));
 }
 void finish(Machine& m, const Options& o) {
+    if (!o.noConfig && !o.config.empty() && m.sd().rtc().revision()) writeRtcState(o.config,m.sd().rtc().state());
     if (!o.saveSnapshot.empty()) m.saveSnapshot(o.saveSnapshot);
     if (!o.record.empty()) m.tape().saveRecording(o.record);
     if (!o.screenshot.empty()) m.screenshot(o.screenshot);
@@ -131,7 +159,7 @@ void printHelp() {
         "  --save-snapshot FILE.osn   save OSN v2 on exit\n"
         "  --screenshot FILE.ppm      save the last framebuffer\n"
         "  --ui-screenshot FILE.bmp   capture the desktop UI on exit (GUI)\n"
-        "  --config FILE --no-config  settings file / ignore saved UI settings\n"
+        "  --config FILE --no-config  GUI settings / headless RTC persistence; disable both\n"
         "  --turbo --melodik --mute --scale 1..8\n"
         "  --frames N                 exit after N frames (headless default: 150)\n"
         "  --check-boot               require enabled video and visible pixels\n"

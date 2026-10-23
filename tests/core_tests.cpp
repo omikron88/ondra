@@ -45,7 +45,8 @@ void mapping() {
     CHECK((m.read(0xe000) & 31) == 15); CHECK(m.read(0xe000) == m.read(0xff00));
     CHECK(!m.write(0xe000, 12)); m.key(0, 4, false); CHECK(m.read(0xe000) == 255);
     m.sound().setMelodik(true); CHECK((m.read(0xe00f) & 32) == 0);
-    CHECK((m.read(0xe01f) & 32) != 0);
+    CHECK((m.read(0xe01f) & 32) == 0);
+    for (unsigned a=0xe000;a<=0xffff;++a) CHECK(m.read(a)==m.read(0xe000+(a&15)));
     m.output(3, 2); CHECK(m.write(0xe000, 12)); CHECK(m.read(0xe000) == 12);
     m.reset(false); CHECK(m.ram()[0] == 42); CHECK(m.read(0) == original);
     rejects([&]() { m.key(10, 0, true); });
@@ -87,6 +88,28 @@ void timing() {
     m.reset(); m.setTurbo(false); allRam(m); m.breakpoints().insert(4);
     CHECK(!m.runFrame()); CHECK(Z80_PC(m.cpu()) == 4);
     m.step(); CHECK(m.runFrame()); CHECK(m.cycles() == 39936);
+}
+void interruptPulse() {
+    for (unsigned mul=1;mul<=2;++mul) {
+        ondra::Machine m; allRam(m); m.setTurbo(mul==2); m.breakpoints().insert(0);
+        CHECK(!m.runFrame()); CHECK(m.cpu().int_line); CHECK(m.cycles()==0);
+        for (unsigned n=0;n<128*mul/4-1;++n) { m.step(); CHECK(m.cpu().int_line); }
+        m.step(); CHECK(m.cycles()==128*mul); CHECK(!m.cpu().int_line);
+        CHECK(!m.cpu().iff1); // Expiration never depends on accepting INT.
+        CHECK(m.runFrame()); CHECK(m.cycles()==39936*mul);
+
+        // EI after the old 16-T window must still accept this frame's INT.
+        for (unsigned late=0;late<2;++late) {
+            m.reset(); allRam(m); m.breakpoints().clear(); m.cpu().im=1; Z80_SP(m.cpu())=0xd000;
+            const unsigned delay=late?128*mul/4+2:12;
+            m.jump(0x4000);
+            m.ram()[0x4000+delay]=0xfb; m.ram()[0x4000+delay+1]=0; m.ram()[0x4000+delay+2]=0x76;
+            const std::uint8_t handler[]={0x04,0xf3,0xc9}; // INC B; DI; RET
+            std::copy(handler,handler+sizeof(handler),m.ram().begin()+0x100);
+            m.ram()[0x38]=0xc3; m.ram()[0x39]=0; m.ram()[0x3a]=1;
+            Z80_B(m.cpu())=0; CHECK(m.runFrame()); CHECK(Z80_B(m.cpu())==(late?0:1));
+        }
+    }
 }
 void disassembler() {
     ondra::Machine m; allRam(m);
@@ -277,7 +300,7 @@ void sdcard() {
 }
 int main() {
     const std::pair<const char*, void(*)()> tests[] = {{"memory mapping",mapping},{"video",video},{"Z80/interrupts",cpuAndInterrupts},
-        {"frame timing/breakpoints",timing},{"Z80 disassembler/prefix limits",disassembler},{"BIN files",binaries},{"OSN snapshots",snapshots},{"tape formats",tapes},
+        {"frame timing/breakpoints",timing},{"128/256-T INT pulse",interruptPulse},{"Z80 disassembler/prefix limits",disassembler},{"BIN files",binaries},{"OSN snapshots",snapshots},{"tape formats",tapes},
         {"ROM TAP loader",romTapeLoader},{"speaker/PSG",audio},{"OndraSD UART",sdcard}};
     try {
         for (const auto& test : tests) { test.second(); std::cout << "PASS " << test.first << '\n'; }

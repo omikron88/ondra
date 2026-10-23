@@ -12,7 +12,8 @@ Grafické rozhraní navazuje na původní JOndru: menu, lišta s původními iko
 LED, ovládání pásky, dialog nastavení a debugger. Používá staticky připojené
 Dear ImGui nad SDL2; font i obrázky jsou součástí programu.
 
-Verze 0.2.0 doplňuje tiskárny Centronics a Tesla BT100 podle současné JOndry.
+Verze 0.3.0 doplňuje bateriové RTC DS1307 v OndraSD a opravy pulsu INT
+a zrcadlení I/O. Podporuje také tiskárny Centronics a Tesla BT100.
 
 ## Sestavení v Linuxu
 
@@ -247,7 +248,7 @@ ctest --test-dir build-headless --output-on-failure
 Headless režim běží bez čekání na skutečný čas. Vypíše registry, počet CPU
 T-stavů, rozlišení, počet svítících bodů a FNV-1a hash obrazu. `--check-boot`
 ověřuje zapnuté video a neprázdný obraz; samotné CPU a mapování ověřuje test
-`core`, který se skládá z jedenácti skupin a více než 4 000 kontrol. Ověřuje i
+`core`, který se skládá z dvanácti skupin a více než 12 000 kontrol. Ověřuje i
 skutečné načtení syntetického TAP programu pomocí zavaděče v ROM. Samostatné
 testy spouštějí každou ROM. Grafické testy používají ovladače `dummy` a skutečné
 události myši a klávesnice: pauza, nastavení, krokování, editace registrů
@@ -261,6 +262,13 @@ polaritu, vůli a zachování papíru při resetu. Výsledky šestnácti stříd
 přejezdů BT100 (snímače a všechny body papíru) porovnává s nezměněnou Java
 implementací. Grafický test navíc ověřuje připojení tiskárny, vypnutí Melodiku,
 vypínač BT100, nový papír a export PNG přes skutečné události myši a klávesnice.
+
+Test `rtc` ověřuje registry a UART příkazy T/S, CH, režim 12/24 h, půlnoc,
+přestupné roky, nezávislý den v týdnu, surové neplatné hodnoty i bateriový stav
+přes reset a nové spuštění. Tisíc kombinací registrů a časových posunů má stejný
+výsledek jako Java verze. Ověřuje také atributy a čekání OndraSD včetně
+jednobajtového SBUF během práce s kartou. Grafický test kontroluje automatické
+uložení změněných hodin do nastavení.
 
 Příkazy debuggeru (adresy jsou desetinné nebo s prefixem `0x`/`$`):
 
@@ -290,6 +298,10 @@ Implementována je 64KiB RAM, 16KiB okno ROM, I/O v E000–FFFF, aktivně nízk�
 klávesnicová matice, joystick, adresové aliasy výstupních latchů A0/A1/A3,
 proměnné rozlišení, obraz 320 × 256, 50Hz přerušení, NMI, turbo, původní
 zvukové vzorky a Melodik se SN76489. Zvuk má 44,1 kHz / 16 bitů / mono.
+I/O okno E000–FFFF dekóduje pouze A[3:0], takže klávesnice, joystick, detekce
+Melodiku a snímače BT100 se zrcadlí každých 16 bajtů. Puls INT trvá 64 µs:
+128 T při 2 MHz nebo 256 T v turbu. Skončí i při zakázaných přerušeních
+a při krokování v debuggeru, jakmile emulovaný čas překročí jeho konec.
 
 Pásky: Ondra TAP s kontrolou součtu a volitelným LF/CR oddělením, CSW v1/v2
 s RLE (typ 1), WAV mono PCM 8/16 bitů; záznam do CSW v2. Z-RLE/zlib CSW není
@@ -300,6 +312,35 @@ OndraSD zachovává bitovou sériovou linku 9600/57600 Bd, vysílání `__LOADER
 příkazy adresáře/souboru, FAT 8.3 aliasy a RTC. Adresář zadaný `--sd` představuje
 kartu. Sektorové CP/M příkazy B/R/W vracejí chybu stejně jako v Javě. Symlinky
 mimo kořen karty se nezpřístupňují. Emulátor nemění hostitelské systémové hodiny.
+Hledání jména účtuje průchod položkami adresáře. Po souboru BIN a výpisu
+adresáře zůstává modul ještě krátce zaměstnaný prací s kartou; v SBUF udrží
+jeden příchozí bajt. Atributy položek odpovídají firmware: 51h pro adresář
+a 71h pro soubor (soubor rozlišuje bit 5).
+
+### RTC DS1307 v OndraSD
+
+Příkaz **T** vrací sedm registrů 0–6, **S** je zapisuje beze změn, včetně
+neplatných BCD hodnot. Model respektuje CH v bitu 7 sekund (zastavení hodin),
+12hodinový režim v bitu 6 hodin, AM/PM v bitu 5, nezávislý den v týdnu,
+přestupné roky a přechod roku 99 → 00. Při prvním použití se nastaví místní
+čas PC; další běh vychází z uplynulého skutečného času, i při pauze nebo turbu.
+V bublině nad **SD** ve spodní liště je vidět čas a případné zastavení hodin.
+
+Bateriový stav se ukládá jako `sdRtc=čas_PC_v_ms,R0,...,R6` (registry hex)
+do `ondra.ini`, automaticky po zápisu hodin. Reset CPU, restart modulu ani
+načtení OSN jej nemaže. Hodiny nejsou součástí historického formátu OSN a jejich
+stav se při načtení snapshotu nevrací zpět. Poškozený záznam se nahradí
+počátečním nastavením podle PC.
+
+V headless režimu určete soubor pro trvalý stav explicitně; ostatní položky
+souboru zůstanou zachované:
+
+```sh
+./build/ondra-headless --sd cesta/ke/karte --config ondra.ini --frames 5000
+```
+
+`--no-config` vypne načítání i ukládání bateriového stavu. Formát hodnoty je
+kompatibilní s `SDRTC` v konfiguraci JOndry; čtení podporuje i tento název klíče.
 
 OSN v1/v2 je kompatibilní s JOndrou a ukládá registry, porty, ROM typ, rozlišení
 a fyzickou RAM včetně RAM pod ROM/I/O; vlastní ROM přibalí do obrazu. Tento

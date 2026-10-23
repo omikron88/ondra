@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <cstdint>
-#include <ctime>
+#include <ondra/rtc.hpp>
 #include <deque>
 #include <string>
 #include <vector>
@@ -16,6 +16,7 @@ public:
     void frameStart(std::uint64_t clock, unsigned multiplier);
     void txWrite(unsigned level, std::uint64_t clock);
     bool rxLevel(std::uint64_t clock);
+    Ds1307& rtc() { return rtc_; }
 private:
     typedef std::int64_t Time;
     struct Tx { Time start; double bit; unsigned value; Time end() const; };
@@ -34,6 +35,7 @@ private:
     void changeDirectory(const std::string& name);
     void sendRtc(Time t);
     void setRtc();
+    Time search(const std::string& name,Time time);
     std::vector<Entry> list(const std::string& path) const;
     std::string find(const std::string& path, const std::string& fat, bool dir) const;
     std::string root_, current_;
@@ -44,6 +46,6 @@ private:
     int command_, pending_;
     bool frameStarted_, broadcast_, waitHigh_, rxActive_;
     double rxBitTime_;
-    std::time_t rtcOffset_;
+    Ds1307 rtc_;
 };
 }

@@ -20,6 +20,12 @@
   `machine/BT100.java` a jejich zapojení v revizi
   `7aad67efd76badfa6b82835bd1285aa7c9bedeb1` (GPLv3). Zachovávají výchozí
   časování, polaritu snímačů, dráhu vozíku a korekci zpětného chodu.
+- Oprava 64µs pulsu INT a zrcadlení I/O po 16 bajtech odpovídá revizi
+  `94b8675486fd00179c965cbddbc61dc1ed683755`.
+- Registry DS1307, bateriový stav a navazující změny protokolu OndraSD jsou
+  odvozené z `machine/OndraSD.java` v revizi
+  `5b3c850e63a8573ea1a24ae3a8e14b6f91f1ce38` (GPLv3). Testy porovnávají
+  chování hodin s touto Java implementací při řízeném zdroji času.
 - Java CPU, Swing UI ani `machine/SN76489.java` nejsou součástí tohoto portu.
   Poslední z těchto souborů má vlastní nekomerční licenci; zdejší `Psg` je nová
   implementace hardwarových registrů a čítačů, nepřebírá jeho implementaci.

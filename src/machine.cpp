@@ -86,13 +86,15 @@ void Machine::cpuOut(void* p, zuint16 a, zuint8 v) { static_cast<Machine*>(p)->o
 std::uint8_t Machine::read(std::uint16_t a) {
     if (a < 0x4000 && !(a3_ & 2)) return rom_[a];
     if (a >= 0xe000 && (a3_ & 4)) {
-        std::uint8_t v = keys_[a & 255];
+        // Only A[3:0] is decoded: every row repeats throughout E000-FFFF.
+        const unsigned row=a&15;
+        std::uint8_t v = keys_[row];
         if (tape_.loaded()) v = static_cast<std::uint8_t>((v & 127) | (tape_.level() ? 128 : 0));
-        if (sound_.melodik() && (a & 255) == 15) v &= ~32;
+        if (sound_.melodik() && row == 15) v &= ~32;
         if (sd_.enabled()) v = static_cast<std::uint8_t>((v & ~64) | (sd_.rxLevel(cycles_) ? 64 : 0));
         if (bt100_.enabled()) {
-            if ((a&255)==9) v=static_cast<std::uint8_t>((v&0xf0)|bt100_.sensorLines(cycles_,multiplier_));
-            else if ((a&255)<9) v=static_cast<std::uint8_t>(v&(0xf0|bt100_.sensorLines(cycles_,multiplier_)));
+            if (row==9) v=static_cast<std::uint8_t>((v&0xf0)|bt100_.sensorLines(cycles_,multiplier_));
+            else if (row<9) v=static_cast<std::uint8_t>(v&(0xf0|bt100_.sensorLines(cycles_,multiplier_)));
         }
         if (printer_.enabled()) v=static_cast<std::uint8_t>((v&~32)|(printer_.busy(cycles_)?32:0));
         return v;
@@ -135,6 +137,9 @@ unsigned Machine::step() {
         const unsigned n = static_cast<unsigned>(z80_run(&cpu_, 1));
         if (!n) throw std::runtime_error("Z80 core made no progress");
         cycles_ += n; consumed += n; tape_.advance(n, multiplier_);
+        // The 8253 pulse expires even when stepping a paused frame or when
+        // interrupts are disabled; accepting an interrupt does not end it.
+        if (frameActive_ && cpu_.int_line && cycles_-frameStart_>=interruptEnd_) z80_int(&cpu_,0);
         // Complete prefixes as one debugger step. Bound malformed streams of
         // DD/FD prefixes so that the desktop stays responsive.
     } while ((cpu_.resume == Z80_RESUME_XY || cpu_.resume == Z80_RESUME_IM0_XY) && consumed < FrameCycles);
@@ -151,14 +156,13 @@ bool Machine::runFrame() {
     if (!frameActive_) {
         frameActive_ = true; frameStart_ = cycles_;
         sd_.frameStart(cycles_, multiplier_); sound_.beginFrame();
-        interruptEnd_ = 16;
+        interruptEnd_ = 128*multiplier_; // 64 us at either CPU clock.
         frameTarget_ = frameBudget();
         z80_int(&cpu_, 1);
     }
     while (cycles_ - frameStart_ + cycleDebt_ < frameTarget_) {
         if (!breakpoints_.empty() && breakpoints_.count(Z80_PC(cpu_))) return false;
         step();
-        if (cycles_ - frameStart_ >= interruptEnd_) z80_int(&cpu_, 0);
     }
     z80_int(&cpu_, 0);
     cycleDebt_ = static_cast<unsigned>(cycles_ - frameStart_ + cycleDebt_ - frameTarget_);

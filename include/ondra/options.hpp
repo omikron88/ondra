@@ -5,7 +5,7 @@
 #include <string>
 namespace ondra {
 struct Options {
-    std::string rom = "basic", romA, romB, load, tape, record, snapshot, saveSnapshot, screenshot, sd, config, uiScreenshot, printer, bt100Output;
+    std::string rom = "basic", romA, romB, load, tape, record, snapshot, saveSnapshot, screenshot, sd, config, uiScreenshot, printer, bt100Output, sdRtc;
     std::set<std::string> explicitOptions;
     unsigned frames = 0, loadAfter = 100, scale = 2, address = 0;
     int pc = -1;
