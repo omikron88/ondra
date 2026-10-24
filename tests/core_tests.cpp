@@ -245,7 +245,7 @@ void audio() {
     psg.write(0x84); psg.write(0x04); psg.write(0x90);
     int changes = 0, previous = psg.sample();
     for (unsigned n = 0; n < 4410; ++n) { int next = psg.sample(); if (next != previous) ++changes; previous = next; }
-    CHECK(changes > 100 && changes < 300); // ~919 Hz with divider 68.
+    CHECK(changes > 200 && changes < 600); // ~1838 Hz with divider 68.
     psg.write(0x9f); CHECK(psg.sample() == 0);
 }
 void sdcard() {

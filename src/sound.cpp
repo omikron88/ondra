@@ -23,16 +23,24 @@ void Psg::write(std::uint8_t v) {
     if (latch_ == 6) { registers_[6] &= 7; lfsr_ = 0x8000; }
 }
 std::int16_t Psg::sample() {
-    fraction_ += 2000000.0 / (16.0 * 44100.0);
+    fraction_ += 4000000.0 / (16.0 * 44100.0);
     unsigned ticks = static_cast<unsigned>(fraction_);
     fraction_ -= ticks;
     while (ticks--) {
         bool tone2Rising = false;
         for (unsigned n = 0; n < 3; ++n) {
             if (--counters_[n] == 0) {
-                counters_[n] = std::max(1u, registers_[n * 2]);
-                polarity_[n] = !polarity_[n];
-                if (n == 2 && polarity_[n]) tone2Rising = true;
+                const unsigned tone = registers_[n * 2];
+                counters_[n] = std::max(1u, tone);
+                // Dividers up to 6 are above hearing on real hardware (register 6 is about
+                // 18.6 kHz at 4 MHz), so the flip-flop output is held instead of toggling:
+                // toggling it would only alias down into the audible band as a whistle.
+                if (tone > 6) {
+                    polarity_[n] = !polarity_[n];
+                    if (n == 2 && polarity_[n]) tone2Rising = true;
+                } else {
+                    polarity_[n] = true;
+                }
             }
         }
         bool shift = false;
