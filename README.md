@@ -12,8 +12,9 @@ Grafické rozhraní navazuje na původní JOndru: menu, lišta s původními iko
 LED, ovládání pásky, dialog nastavení a debugger. Používá staticky připojené
 Dear ImGui nad SDL2; font i obrázky jsou součástí programu.
 
-Verze 0.3.0 doplňuje bateriové RTC DS1307 v OndraSD a opravy pulsu INT
-a zrcadlení I/O. Podporuje také tiskárny Centronics a Tesla BT100.
+Verze 0.4.0 otevírá Settings a Debugger v samostatných dceřiných SDL oknech.
+Podporuje také bateriové RTC DS1307 v OndraSD, opravené časování INT a zrcadlení
+I/O i tiskárny Centronics a Tesla BT100.
 
 ## Sestavení v Linuxu
 
@@ -148,6 +149,11 @@ OndraSD, zvětšení, celou obrazovku, CRT řádkování a Scale2x. Volby se ukl
 do `ondra.ini` vedle programu; jiný soubor lze určit `--config soubor.ini`.
 `--no-config` vypne načítání i ukládání nastavení. Výslovné parametry příkazové
 řádky mají přednost před uloženými volbami.
+Nastavení má vlastní SDL okno, které lze přesunout mimo hlavní okno a zvětšit.
+Při otevření pozastaví počítač; Apply, Cancel i zavření křížkem obnoví předchozí
+stav běhu. Výběr souborů a chybová hlášení z nastavení zůstávají v tomto okně.
+
+![Samostatné okno nastavení](docs/settings.png)
 
 **Tools → Debugger** otevře disassembler, registry, zásobník, breakpointy
 a editor paměti. Registry a bajty se upravují při pauze a potvrzují Enterem;
@@ -155,7 +161,10 @@ adresy a hodnoty jsou šestnáctkové. Breakpoint lze přepnout také kliknutím
 na instrukci. F3 krokuje instrukci, F7 přejde přes CALL/RST s omezením délky
 vykonávání. **Tools → Keyboard** zobrazí obrázek klávesnice a tlačítka kláves.
 Při psaní v souborovém dialogu, nastavení a debuggeru se klávesy neposílají
-do emulovaného počítače.
+do emulovaného počítače. Debugger je samostatné SDL okno s vlastním posunem
+a velikostí; hlavní okno se při jeho otevření nezvětšuje. Zavření debuggeru
+zachová Run/Pause a neukončí emulátor. Po spuštění přes Run lze vrátit fokus
+do hlavního okna a ovládat Ondru klávesnicí i s otevřeným debuggerem.
 
 ![Grafický debugger](docs/debugger.png)
 
@@ -254,7 +263,9 @@ testy spouštějí každou ROM. Grafické testy používají ovladače `dummy` a
 události myši a klávesnice: pauza, nastavení, krokování, editace registrů
 a breakpointů, uložení/načtení snapshotu s českým názvem a zotavení po chybě.
 Kontrolují také potvrzení přepsání souboru, BIN dialogy a přednost parametrů
-před uloženými nastaveními.
+před uloženými nastaveními. Dále ověřují samostatné SDL renderery/ImGui kontexty,
+směrování událostí do správného okna, fokus, přesun/zvětšení debuggeru, zavírání
+křížkem, opakované otevírání a souborové/chybové dialogy ve vlastním okně.
 
 Test `printers` spouští skutečný Z80 ovladač Centronics s čekáním na BUSY,
 ověřuje binární připisování, buffer, turbo, chyby souborů, snímače BT100,

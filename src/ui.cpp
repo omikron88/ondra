@@ -7,6 +7,12 @@
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_sdlrenderer2.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <SDL_syswm.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -77,6 +83,101 @@ bool hexInput(const char* label,unsigned& value,unsigned width=4) {
 const char* romNames[]={"Basic EXP v5","Tesla ROM","SSM / ViLi v25","SSM / ViLi v27","Ondra+ ROM","Custom ROM"};
 const char* romIds[]={"basic","tesla","vili25","vili27","plus","custom"};
 int romIndex(const std::string& name) { for (int i=0;i<6;++i) if (name==romIds[i]) return i; return 0; }
+
+struct ContextScope {
+    ImGuiContext* previous;
+    explicit ContextScope(ImGuiContext* context):previous(ImGui::GetCurrentContext()) { ImGui::SetCurrentContext(context); }
+    ~ContextScope() { ImGui::SetCurrentContext(previous); }
+};
+void configureContext(std::vector<std::uint8_t>& font) {
+    ImGui::GetIO().IniFilename=NULL;
+    ImGui::StyleColorsLight();
+    auto& style=ImGui::GetStyle(); style.WindowRounding=3; style.FrameRounding=2; style.PopupRounding=3;
+    style.FramePadding=ImVec2(5,4); style.ItemSpacing=ImVec2(7,6); style.WindowBorderSize=1;
+    style.Colors[ImGuiCol_WindowBg]=ImVec4(0.94f,0.94f,0.94f,1);
+    style.Colors[ImGuiCol_PopupBg]=ImVec4(0.94f,0.94f,0.94f,1);
+    style.Colors[ImGuiCol_MenuBarBg]=ImVec4(0.93f,0.93f,0.93f,1);
+    style.Colors[ImGuiCol_Button]=ImVec4(0.86f,0.87f,0.88f,1);
+    style.Colors[ImGuiCol_Header]=ImVec4(0.68f,0.78f,0.9f,1);
+    ImFontConfig fc; fc.FontDataOwnedByAtlas=false;
+    static const ImWchar ranges[]={0x20,0x17f,0x2000,0x206f,0};
+    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font.data(),static_cast<int>(font.size()),15,&fc,ranges);
+}
+SDL_Texture* loadIcon(SDL_Renderer* renderer,const char* name) {
+    const auto data=resource(std::string(name)+".rgba"); const unsigned width=dword(data,0),height=dword(data,4);
+    if (data.size()!=8+width*height*4) throw std::runtime_error("Invalid UI image");
+    SDL_Surface* surface=SDL_CreateRGBSurfaceWithFormatFrom(const_cast<std::uint8_t*>(data.data()+8),width,height,32,width*4,SDL_PIXELFORMAT_RGBA32);
+    sdl(surface!=NULL,"Load UI image");
+    SDL_Texture* texture=SDL_CreateTextureFromSurface(renderer,surface); SDL_FreeSurface(surface);
+    sdl(texture!=NULL,"Create UI image"); SDL_SetTextureBlendMode(texture,SDL_BLENDMODE_BLEND); return texture;
+}
+// Each SDL renderer needs its own font atlas and textures. Backend state is
+// context-local; events must be routed by SDL window ID before calling ImGui.
+struct ToolWindow {
+    SDL_Window* window=NULL;
+    SDL_Renderer* renderer=NULL;
+    ImGuiContext* context=NULL;
+    std::map<std::string,SDL_Texture*> icons;
+    bool platformReady=false,rendererReady=false,frameReady=false;
+    ToolWindow(SDL_Window* parent,std::vector<std::uint8_t>& font,const char* title,int width,int height,int minWidth,int minHeight) {
+        ContextScope restore(ImGui::GetCurrentContext());
+        try {
+            int x=0,y=0,w=0,h=0; SDL_GetWindowPosition(parent,&x,&y); SDL_GetWindowSize(parent,&w,&h);
+            SDL_Rect display={x,y,width,height};
+            SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(parent),&display);
+            width=std::min(width,display.w); height=std::min(height,display.h);
+            x=std::max(display.x,std::min(x+(w-width)/2,display.x+display.w-width));
+            y=std::max(display.y,std::min(y+(h-height)/2,display.y+display.h-height));
+            window=SDL_CreateWindow(title,x,y,width,height,SDL_WINDOW_HIDDEN|SDL_WINDOW_RESIZABLE|SDL_WINDOW_ALLOW_HIGHDPI|SDL_WINDOW_UTILITY);
+            sdl(window!=NULL,"Create tool window");
+            SDL_SetWindowMinimumSize(window,std::min(minWidth,width),std::min(minHeight,height));
+            renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_ACCELERATED);
+            if (!renderer) renderer=SDL_CreateRenderer(window,-1,SDL_RENDERER_SOFTWARE);
+            sdl(renderer!=NULL,"Create tool renderer");
+            // Creating a renderer can recreate the native window (e.g. to
+            // add OpenGL flags), so attach the parent after that operation.
+#ifdef _WIN32
+            SDL_SysWMinfo childInfo={},parentInfo={}; SDL_VERSION(&childInfo.version); SDL_VERSION(&parentInfo.version);
+            if (SDL_GetWindowWMInfo(window,&childInfo) && SDL_GetWindowWMInfo(parent,&parentInfo) && childInfo.subsystem==SDL_SYSWM_WINDOWS && parentInfo.subsystem==SDL_SYSWM_WINDOWS)
+                SetWindowLongPtrW(childInfo.info.win.window,GWLP_HWNDPARENT,reinterpret_cast<LONG_PTR>(parentInfo.info.win.window));
+#else
+            // X11 implements this as WM_TRANSIENT_FOR without blocking the
+            // parent. Other SDL drivers may leave this relationship unsupported.
+            if (SDL_SetWindowModalFor(window,parent)!=0) SDL_ClearError();
+#endif
+            context=ImGui::CreateContext(); ImGui::SetCurrentContext(context); configureContext(font);
+            platformReady=ImGui_ImplSDL2_InitForSDLRenderer(window,renderer); sdl(platformReady,"Tool window input");
+            rendererReady=ImGui_ImplSDLRenderer2_Init(renderer); sdl(rendererReady,"Tool window renderer");
+            for (const char* name:{"rundbg","step","stepover","reset"}) icons[name]=loadIcon(renderer,name);
+            if (!(SDL_GetWindowFlags(parent)&SDL_WINDOW_HIDDEN)) SDL_ShowWindow(window);
+            SDL_RaiseWindow(window);
+        } catch (...) { release(); throw; }
+    }
+    ~ToolWindow() { release(); }
+    void release() {
+        ImGuiContext* previous=ImGui::GetCurrentContext(); ImGui::SetCurrentContext(context);
+        for (auto& icon:icons) SDL_DestroyTexture(icon.second);
+        icons.clear();
+        if (rendererReady) ImGui_ImplSDLRenderer2_Shutdown();
+        if (platformReady) ImGui_ImplSDL2_Shutdown();
+        if (context) ImGui::DestroyContext(context);
+        ImGui::SetCurrentContext(previous==context?NULL:previous);
+        SDL_DestroyRenderer(renderer); SDL_DestroyWindow(window);
+        context=NULL; renderer=NULL; window=NULL; platformReady=rendererReady=false;
+    }
+    void begin() {
+        ImGui::SetCurrentContext(context);
+        if (SDL_GetKeyboardFocus()==window) ImGui::GetIO().ConfigFlags&=~ImGuiConfigFlags_NoMouseCursorChange;
+        else ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;
+        ImGui_ImplSDLRenderer2_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame(); frameReady=true;
+    }
+    void render() {
+        if (!frameReady) return;
+        ContextScope active(context); ImGui::Render();
+        SDL_SetRenderDrawColor(renderer,240,240,240,255); SDL_RenderClear(renderer);
+        ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(),renderer); SDL_RenderPresent(renderer); frameReady=false;
+    }
+};
 }
 
 void Desktop::restorePreferences(Options& options) {
@@ -105,10 +206,16 @@ void Desktop::restorePreferences(Options& options) {
 
 struct Desktop::Impl {
     SDL_Window* window; SDL_Renderer* renderer; Machine& m; Options options;
+    ImGuiContext* context=NULL;
+    Uint32 focusWindow=0;
     std::map<std::string,SDL_Texture*> icons;
     std::map<std::string,ImVec4> bounds;
+    std::map<std::string,Uint32> boundWindows;
     SDL_Texture *screen=NULL,*scaled=NULL,*renderTexture=NULL;
     std::vector<std::uint8_t> font;
+    std::unique_ptr<ToolWindow> settingsWindow,debuggerWindow;
+    enum class Surface { Main,Settings,Debugger };
+    Surface fileOwner=Surface::Main,messageOwner=Surface::Main;
     std::vector<std::uint32_t> scaledPixels;
     bool run=true,stop=false,audio=true,fullscreen=false,scanlines=false,scale2x=false;
     bool settings=false,debugger=false,keyboard=false,about=false,settingsWasPaused=false;
@@ -149,19 +256,8 @@ struct Desktop::Impl {
         const auto last=saved.find("directory");
         lastDirectory=last!=saved.end() && isDirectory(last->second)?last->second:friendly(canonical("."));
         if (lastDirectory.empty()) lastDirectory=".";
-        IMGUI_CHECKVERSION(); ImGui::CreateContext();
-        ImGui::GetIO().IniFilename=NULL;
-        ImGui::StyleColorsLight();
-        auto& style=ImGui::GetStyle(); style.WindowRounding=3; style.FrameRounding=2; style.PopupRounding=3;
-        style.FramePadding=ImVec2(5,4); style.ItemSpacing=ImVec2(7,6); style.WindowBorderSize=1;
-        style.Colors[ImGuiCol_WindowBg]=ImVec4(0.94f,0.94f,0.94f,1);
-        style.Colors[ImGuiCol_PopupBg]=ImVec4(0.94f,0.94f,0.94f,1);
-        style.Colors[ImGuiCol_MenuBarBg]=ImVec4(0.93f,0.93f,0.93f,1);
-        style.Colors[ImGuiCol_Button]=ImVec4(0.86f,0.87f,0.88f,1);
-        style.Colors[ImGuiCol_Header]=ImVec4(0.68f,0.78f,0.9f,1);
-        font=resource("Roboto-Medium.ttf"); ImFontConfig fc; fc.FontDataOwnedByAtlas=false;
-        static const ImWchar ranges[]={0x20,0x17f,0x2000,0x206f,0};
-        ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font.data(),static_cast<int>(font.size()),15,&fc,ranges);
+        IMGUI_CHECKVERSION(); context=ImGui::CreateContext(); ImGui::SetCurrentContext(context);
+        font=resource("Roboto-Medium.ttf"); configureContext(font); focusWindow=SDL_GetWindowID(window);
         sdl(ImGui_ImplSDL2_InitForSDLRenderer(w,r),"ImGui SDL input");
         sdl(ImGui_ImplSDLRenderer2_Init(r),"ImGui SDL renderer");
         screen=SDL_CreateTexture(r,SDL_PIXELFORMAT_ARGB8888,SDL_TEXTUREACCESS_STREAMING,320,256);
@@ -185,18 +281,28 @@ struct Desktop::Impl {
         }
     }
     ~Impl() {
+        ImGui::SetCurrentContext(context); settingsWindow.reset(); debuggerWindow.reset();
         for (auto& image:icons) SDL_DestroyTexture(image.second);
         SDL_DestroyTexture(screen); SDL_DestroyTexture(scaled);
-        ImGui_ImplSDLRenderer2_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext();
+        ImGui_ImplSDLRenderer2_Shutdown(); ImGui_ImplSDL2_Shutdown(); ImGui::DestroyContext(context);
+    }
+    Surface surface() const {
+        const auto active=ImGui::GetCurrentContext();
+        return settingsWindow && active==settingsWindow->context?Surface::Settings:debuggerWindow && active==debuggerWindow->context?Surface::Debugger:Surface::Main;
+    }
+    SDL_Window* surfaceWindow(Surface owner) const {
+        return owner==Surface::Settings && settingsWindow?settingsWindow->window:owner==Surface::Debugger && debuggerWindow?debuggerWindow->window:window;
     }
     void remember(const std::string& name) {
         const auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax(); bounds[name]=ImVec4(a.x,a.y,b.x-a.x,b.y-a.y);
+        boundWindows[name]=SDL_GetWindowID(surfaceWindow(surface()));
     }
-    void error(const std::string& e) { if (file!=File::None) fileError=e; else message=e; }
+    void error(const std::string& e) { if (file!=File::None) fileError=e; else { message=e; messageOwner=surface(); } }
     void attempt(const std::function<void()>& action) { try { action(); } catch (const std::exception& e) { error(e.what()); } }
     bool button(const char* name,const char* icon,const char* tooltip,bool selected=false) {
         if (selected) ImGui::PushStyleColor(ImGuiCol_Button,ImVec4(0.58f,0.73f,0.89f,1));
-        const bool clicked=ImGui::ImageButton(name,imageId(icons.at(icon)),ImVec2(18,18));
+        const auto& images=surface()==Surface::Debugger?debuggerWindow->icons:icons;
+        const bool clicked=ImGui::ImageButton(name,imageId(images.at(icon)),ImVec2(18,18));
         if (selected) ImGui::PopStyleColor();
         remember(name);
         tip(tooltip);
@@ -224,7 +330,7 @@ struct Desktop::Impl {
     }
     void resize(unsigned factor) { scale=factor; if (!fullscreen) SDL_SetWindowSize(window,std::max(640u,320*factor+12),std::max(400u,256*factor+106)); }
     void dialogSize(float width,float height) {
-        int w=0,h=0; SDL_GetWindowSize(window,&w,&h);
+        int w=0,h=0; SDL_GetWindowSize(surfaceWindow(surface()),&w,&h);
         ImGui::SetNextWindowSize(ImVec2(std::min(width,float(w-16)),std::min(height,float(h-16))),ImGuiCond_Appearing);
     }
     void resume() { if (m.breakpoints().count(Z80_PC(m.cpu()))) m.step(); stop=false; }
@@ -251,10 +357,12 @@ struct Desktop::Impl {
     }
     void quit() {
         try { flushRecording(); run=false; }
-        catch (const std::exception& e) { message=e.what(); quitWithoutSaving=true; }
+        catch (const std::exception& e) { message=e.what(); messageOwner=Surface::Main; SDL_RaiseWindow(window); quitWithoutSaving=true; }
     }
     void openSettings() {
-        if (settings) return;
+        if (settings) { SDL_RaiseWindow(settingsWindow->window); return; }
+        settingsWindow.reset(new ToolWindow(window,font,"Ondra - Settings",660,620,560,520));
+        focusWindow=SDL_GetWindowID(settingsWindow->window);
         settingsWasPaused=stop; stop=true; settings=true; rom=romIndex(m.romName());
         text(romA,activeRomA); text(romB,activeRomB); text(sdDirectory,activeSd);
         settingAudio=audio; settingMelodik=m.sound().melodik(); settingTurbo=m.turbo(); settingFull=fullscreen;
@@ -262,14 +370,20 @@ struct Desktop::Impl {
         settingScan=scanlines; settingScale2x=scale2x; settingScale=scale; settingSd=!activeSd.empty();
     }
     void openDebugger() {
+        if (!debuggerWindow) debuggerWindow.reset(new ToolWindow(window,font,"Ondra - Debugger",960,720,860,660));
+        SDL_RaiseWindow(debuggerWindow->window); focusWindow=SDL_GetWindowID(debuggerWindow->window);
         debugger=true; stop=true; followPc=true;
-        if (!fullscreen) {
-            int w=0,h=0; SDL_GetWindowSize(window,&w,&h);
-            SDL_Rect desktop={0,0,1100,800}; SDL_GetDisplayUsableBounds(SDL_GetWindowDisplayIndex(window),&desktop);
-            SDL_SetWindowSize(window,std::max(w,std::min(1100,desktop.w)),std::max(h,std::min(800,desktop.h-40)));
-        }
+    }
+    void closeTool(Surface owner) {
+        if (file!=File::None && fileOwner==owner) { file=File::None; stop=fileWasPaused; fileRequest=false; overwrite=false; }
+        if (messageOwner==owner) message.clear();
+        if (owner==Surface::Settings) { settings=false; stop=settingsWasPaused; }
+        else debugger=false; // Closing a debugger preserves Run/Pause.
+        SDL_RaiseWindow(window); focusWindow=SDL_GetWindowID(window);
     }
     void open(File mode) {
+        if (file!=File::None) { SDL_RaiseWindow(surfaceWindow(fileOwner)); return; }
+        fileOwner=surface();
         file=mode; fileRequest=true; fileWasPaused=stop; stop=true; fileError.clear(); pendingPath.clear(); overwrite=false;
         text(browserPath,lastDirectory); text(fileName,mode==File::SnapshotSave?"ondra.osn":mode==File::TapeSave?"recording.csw":mode==File::MemorySave?"memory.bin":mode==File::Screenshot?"screenshot.ppm":mode==File::PrinterOutput?"printer.prn":mode==File::Bt100Image?"bt100.png":"");
         try { refresh(); } catch (const std::exception& e) { entries.clear(); fileError=e.what(); }
@@ -282,6 +396,7 @@ struct Desktop::Impl {
     }
     void accept(const std::string& path);
     void drawMenu(); void drawToolbar(); void drawStatus(); void drawSettings(); void drawDebugger(); void drawKeyboard(); void drawFiles(); void drawMessages(); void drawPrinter();
+    void drawTool(ToolWindow& tool,Surface owner);
     void draw(); void render(const std::string& capture);
 };
 
@@ -375,11 +490,18 @@ void Desktop::Impl::drawStatus() {
     if (m.printer().enabled()) { ImGui::SameLine(); ImGui::Text("| PRN: %llu",static_cast<unsigned long long>(m.printer().total())); tip(m.printer().path().c_str()); }
 }
 void Desktop::Impl::draw() {
-    ImGui_ImplSDLRenderer2_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame(); bounds.clear(); virtualKeys.clear();
+    ImGui::SetCurrentContext(context);
+    if (!settings) settingsWindow.reset();
+    if (!debugger) debuggerWindow.reset();
+    if (SDL_GetKeyboardFocus()==window) ImGui::GetIO().ConfigFlags&=~ImGuiConfigFlags_NoMouseCursorChange;
+    else ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_NoMouseCursorChange;
+    ImGui_ImplSDLRenderer2_NewFrame(); ImGui_ImplSDL2_NewFrame(); ImGui::NewFrame(); bounds.clear(); boundWindows.clear(); virtualKeys.clear();
     ImGui::SetNextWindowPos(ImVec2(0,0)); ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(fullscreen?0:6,fullscreen?0:6));
     const auto flags=ImGuiWindowFlags_NoDecoration|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoBringToFrontOnFocus|(fullscreen?0:ImGuiWindowFlags_MenuBar);
     ImGui::Begin("Ondra desktop",NULL,flags);
+    const bool blocked=settings || (file!=File::None && fileOwner!=Surface::Main) || (!message.empty() && messageOwner!=Surface::Main);
+    ImGui::BeginDisabled(blocked);
     attempt([&]() { if (!fullscreen) { drawMenu(); drawToolbar(); } });
     const float statusHeight=fullscreen?0:40;
     const auto available=ImGui::GetContentRegionAvail(); const ImVec2 area(std::max(1.0f,available.x),std::max(1.0f,available.y-statusHeight));
@@ -395,12 +517,32 @@ void Desktop::Impl::draw() {
     }
     ImGui::InvisibleButton("Screen",area); remember("Screen");
     if (!fullscreen) attempt([&]() { drawStatus(); });
-    ImGui::End(); ImGui::PopStyleVar();
-    attempt([&]() { drawSettings(); drawDebugger(); drawKeyboard(); drawPrinter(); drawFiles(); });
+    ImGui::EndDisabled(); ImGui::End(); ImGui::PopStyleVar();
+    ImGui::BeginDisabled(blocked); attempt([&]() { drawKeyboard(); drawPrinter(); }); ImGui::EndDisabled();
+    attempt([&]() { drawFiles(); });
     if (!m.printer().error().empty() && reportedPrinterError!=m.printer().error()) { reportedPrinterError=m.printer().error(); error(reportedPrinterError); }
     drawMessages();
+    if (settingsWindow && settings) drawTool(*settingsWindow,Surface::Settings);
+    if (debuggerWindow && debugger) drawTool(*debuggerWindow,Surface::Debugger);
+    // SDL mouse capture is global. The backend for an unfocused context must
+    // not cancel a drag in the focused window when its NewFrame runs later.
+    ImGuiContext* focused=context;
+    if (settingsWindow && SDL_GetKeyboardFocus()==settingsWindow->window) focused=settingsWindow->context;
+    if (debuggerWindow && SDL_GetKeyboardFocus()==debuggerWindow->window) focused=debuggerWindow->context;
+    { ContextScope active(focused); bool dragging=false;
+      for (int button=0;button<3;++button) dragging=dragging || ImGui::IsMouseDragging(button,1.0f);
+      SDL_CaptureMouse(dragging?SDL_TRUE:SDL_FALSE); }
+    ImGui::SetCurrentContext(context);
+}
+void Desktop::Impl::drawTool(ToolWindow& tool,Surface owner) {
+    ContextScope restore(tool.context); tool.begin();
+    ImGui::BeginDisabled((owner==Surface::Debugger && settings) || (file!=File::None && fileOwner!=owner) || (!message.empty() && messageOwner!=owner));
+    if (owner==Surface::Settings) drawSettings(); else drawDebugger();
+    ImGui::EndDisabled();
+    attempt([&]() { drawFiles(); }); drawMessages();
 }
 void Desktop::Impl::render(const std::string& capture) {
+    ContextScope active(context);
     if (m.sd().rtc().revision()!=savedRtcRevision) { savedRtcRevision=m.sd().rtc().revision(); savePreferences(); }
     const auto& pixels=m.pixels();
     if (renderTexture==scaled) {
@@ -422,6 +564,8 @@ void Desktop::Impl::render(const std::string& capture) {
         const int saved=read==0?SDL_SaveBMP(surface,capture.c_str()):-1; SDL_FreeSurface(surface); sdl(read==0 && saved==0,"Save UI screenshot");
     }
     SDL_RenderPresent(renderer);
+    if (settingsWindow) settingsWindow->render();
+    if (debuggerWindow) debuggerWindow->render();
 }
 
 void Desktop::Impl::accept(const std::string& path) {
@@ -452,7 +596,7 @@ void Desktop::Impl::accept(const std::string& path) {
     ImGui::CloseCurrentPopup(); savePreferences();
 }
 void Desktop::Impl::drawFiles() {
-    if (file==File::None) return;
+    if (file==File::None || fileOwner!=surface()) return;
     if (fileRequest) { ImGui::OpenPopup("Select file"); fileRequest=false; }
     dialogSize(660,500);
     bool visible=true;
@@ -533,8 +677,8 @@ void Desktop::Impl::drawFiles() {
 
 void Desktop::Impl::drawSettings() {
     if (!settings) return;
-    dialogSize(560,570);
-    ImGui::Begin("Settings",&settings,ImGuiWindowFlags_NoCollapse);
+    ImGui::SetNextWindowPos(ImVec2(0,0)); ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("Settings",NULL,ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
     if (ImGui::BeginTabBar("Settings tabs")) {
         if (ImGui::BeginTabItem("Computer")) {
             ImGui::SeparatorText("ROM");
@@ -554,6 +698,7 @@ void Desktop::Impl::drawSettings() {
             ImGui::SeparatorText("OndraSD");
             ImGui::Checkbox("Enable OndraSD module",&settingSd);
             ImGui::SetNextItemWidth(-85); ImGui::InputText("##sdpath",sdDirectory.data(),sdDirectory.size()); ImGui::SameLine(); if (ImGui::Button("Browse...")) open(File::SdDirectory);
+            remember("Settings.SdBrowse");
             ImGui::Spacing(); ImGui::TextWrapped("Changing ROM or the SD card resets the computer. Sound and display changes apply without a reset.");
             ImGui::EndTabItem();
         }
@@ -596,12 +741,12 @@ void Desktop::Impl::drawSettings() {
         scanlines=settingScan; scale2x=settingScale2x;
         if (settingFull!=fullscreen) setFullscreen(settingFull);
         if (settingScale!=static_cast<int>(scale)) resize(settingScale);
-        settings=false; stop=settingsWasPaused; savePreferences(); notice="Settings applied.";
+        notice="Settings applied."; closeTool(Surface::Settings);
+        { ContextScope active(context); savePreferences(); }
     }); remember("Settings.Apply");
-    ImGui::SameLine(); if (ImGui::Button("Cancel",ImVec2(100,0))) settings=false; remember("Settings.Cancel");
+    ImGui::SameLine(); if (ImGui::Button("Cancel",ImVec2(100,0))) closeTool(Surface::Settings); remember("Settings.Cancel");
     if (!config.empty()) { ImGui::Spacing(); ImGui::TextDisabled("Settings: %s",friendly(config).c_str()); }
     ImGui::End();
-    if (!settings) stop=settingsWasPaused;
 }
 
 void Desktop::Impl::drawPrinter() {
@@ -639,7 +784,7 @@ void Desktop::Impl::drawPrinter() {
 }
 
 void Desktop::Impl::drawMessages() {
-    if (about) {
+    if (about && surface()==Surface::Main) {
         ImGui::SetNextWindowSize(ImVec2(390,0),ImGuiCond_Appearing);
         ImGui::Begin("About Ondra",&about,ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoCollapse);
         ImGui::Image(imageId(icons.at("ondra")),ImVec2(48,48)); ImGui::SameLine();
@@ -653,11 +798,12 @@ void Desktop::Impl::drawMessages() {
         if (ImGui::Button("Close")) about=false;
         ImGui::End();
     }
+    if (messageOwner!=surface()) return;
     if (!message.empty()) ImGui::OpenPopup("Ondra message");
     ImGui::SetNextWindowSize(ImVec2(440,0),ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("Ondra message",NULL,ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::TextWrapped("%s",message.c_str());
-        if (ImGui::Button("OK",ImVec2(100,0))) { message.clear(); ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("OK",ImVec2(100,0))) { message.clear(); ImGui::CloseCurrentPopup(); } remember("Message.OK");
         if (quitWithoutSaving) { ImGui::SameLine(); if (ImGui::Button("Quit without saving")) { m.tape().stopRecording(); message.clear(); run=false; ImGui::CloseCurrentPopup(); } }
         ImGui::EndPopup();
     }
@@ -687,8 +833,8 @@ void Desktop::Impl::drawKeyboard() {
 
 void Desktop::Impl::drawDebugger() {
     if (!debugger) return;
-    dialogSize(900,680);
-    ImGui::Begin("Debugger",&debugger,ImGuiWindowFlags_NoCollapse);
+    ImGui::SetNextWindowPos(ImVec2(0,0)); ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+    ImGui::Begin("Debugger",NULL,ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoSavedSettings);
     if (button("Debug.Run","rundbg","Run / Pause",!stop)) togglePause();
     ImGui::SameLine();
     if (button("Debug.Step","step","Step into (F3)")) attempt([&]() { step(); });
@@ -780,7 +926,8 @@ void Desktop::Impl::drawDebugger() {
     }
     ImGui::SeparatorText("Memory"); ImGui::SetNextItemWidth(85); hexInput("Start",memoryAddress); memoryAddress&=65535;
     ImGui::SameLine(); ImGui::Checkbox("Physical RAM",&physicalMemory); ImGui::SameLine(); ImGui::TextDisabled("Edit bytes while paused; press Enter to commit.");
-    if (ImGui::BeginTable("Memory",18,ImGuiTableFlags_SizingFixedFit|ImGuiTableFlags_ScrollY|ImGuiTableFlags_BordersInnerV,ImVec2(0,160))) {
+    const float memoryHeight=std::max(100.0f,ImGui::GetContentRegionAvail().y-36);
+    if (ImGui::BeginTable("Memory",18,ImGuiTableFlags_SizingFixedFit|ImGuiTableFlags_ScrollY|ImGuiTableFlags_BordersInnerV,ImVec2(0,memoryHeight))) {
         ImGui::TableSetupColumn("Address"); for (unsigned i=0;i<16;++i) { char h[4]; std::snprintf(h,sizeof(h),"%X",i); ImGui::TableSetupColumn(h); } ImGui::TableSetupColumn("Text"); ImGui::TableHeadersRow();
         for (unsigned row=0;row<16;++row) {
             const unsigned address=(memoryAddress+row*16)&65535; ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::Text("%04X",address);
@@ -809,7 +956,10 @@ Desktop::~Desktop() {}
 bool Desktop::running() const { return impl_->run; }
 bool Desktop::paused() const { return impl_->stop; }
 bool Desktop::soundEnabled() const { return impl_->audio; }
-bool Desktop::capturesKeyboard() const { return impl_->file!=Impl::File::None || impl_->settings || impl_->debugger || impl_->about || !impl_->message.empty() || ImGui::GetIO().WantCaptureKeyboard; }
+bool Desktop::capturesKeyboard() const {
+    ContextScope active(impl_->context);
+    return impl_->focusWindow!=SDL_GetWindowID(impl_->window) || impl_->file!=Impl::File::None || impl_->settings || impl_->about || !impl_->message.empty() || ImGui::GetIO().WantCaptureKeyboard;
+}
 void Desktop::pause() { impl_->stop=true; }
 void Desktop::quit() { impl_->quit(); }
 void Desktop::report(const std::string& error) { impl_->error(error); }
@@ -821,6 +971,9 @@ bool Desktop::widgetBounds(const std::string& name,float& x,float& y,float& widt
     const auto p=impl_->bounds.find(name); if (p==impl_->bounds.end()) return false;
     x=p->second.x; y=p->second.y; width=p->second.z; height=p->second.w; return true;
 }
+SDL_Window* Desktop::widgetWindow(const std::string& name) const {
+    const auto p=impl_->boundWindows.find(name); return p==impl_->boundWindows.end()?NULL:SDL_GetWindowFromID(p->second);
+}
 void Desktop::droppedFile(const std::string& path) {
     impl_->attempt([&]() {
         const auto ext=extension(path);
@@ -831,12 +984,41 @@ void Desktop::droppedFile(const std::string& path) {
     });
 }
 void Desktop::event(const SDL_Event& event) {
-    ImGui_ImplSDL2_ProcessEvent(&event);
     if (event.type==SDL_QUIT) { quit(); return; }
+    Uint32 id=0;
+    switch (event.type) {
+    case SDL_WINDOWEVENT: id=event.window.windowID; break;
+    case SDL_KEYDOWN: case SDL_KEYUP: id=event.key.windowID; break;
+    case SDL_TEXTINPUT: id=event.text.windowID; break;
+    case SDL_TEXTEDITING: id=event.edit.windowID; break;
+    case SDL_MOUSEMOTION: id=event.motion.windowID; break;
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: id=event.button.windowID; break;
+    case SDL_MOUSEWHEEL: id=event.wheel.windowID; break;
+    default: return;
+    }
+    Impl::Surface owner=Impl::Surface::Main; ImGuiContext* context=impl_->context;
+    if (impl_->settingsWindow && impl_->settings && id==SDL_GetWindowID(impl_->settingsWindow->window)) { owner=Impl::Surface::Settings; context=impl_->settingsWindow->context; }
+    else if (impl_->debuggerWindow && impl_->debugger && id==SDL_GetWindowID(impl_->debuggerWindow->window)) { owner=Impl::Surface::Debugger; context=impl_->debuggerWindow->context; }
+    else if (id!=SDL_GetWindowID(impl_->window)) return;
+    ContextScope active(context); ImGui_ImplSDL2_ProcessEvent(&event);
+    if (event.type==SDL_WINDOWEVENT) {
+        if (event.window.event==SDL_WINDOWEVENT_FOCUS_GAINED) { impl_->focusWindow=id; impl_->m.releaseKeys(); }
+        if (event.window.event==SDL_WINDOWEVENT_FOCUS_LOST) { if (impl_->focusWindow==id) impl_->focusWindow=0; impl_->m.releaseKeys(); }
+        if (event.window.event==SDL_WINDOWEVENT_CLOSE) {
+            if (owner==Impl::Surface::Main) quit(); else impl_->closeTool(owner);
+        }
+        return;
+    }
     if (event.type!=SDL_KEYDOWN || event.key.repeat) return;
+    if (event.key.keysym.scancode==SDL_SCANCODE_ESCAPE && owner==Impl::Surface::Settings && impl_->file==Impl::File::None && impl_->message.empty() && !ImGui::GetIO().WantTextInput) {
+        impl_->closeTool(owner); return;
+    }
+    // Editing a dialog must not resume/step/reset the paused machine through
+    // a shortcut from another window (including the main toolbar).
+    if (impl_->settings || impl_->file!=Impl::File::None || !impl_->message.empty()) return;
     impl_->attempt([&]() {
         switch (event.key.keysym.scancode) {
-        case SDL_SCANCODE_F1: impl_->about=true; break;
+        case SDL_SCANCODE_F1: impl_->about=true; SDL_RaiseWindow(impl_->window); break;
         case SDL_SCANCODE_F2: impl_->togglePause(); break;
         case SDL_SCANCODE_F3: impl_->step(); break;
         case SDL_SCANCODE_F4: impl_->m.nmi(); break;

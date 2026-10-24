@@ -27,8 +27,9 @@ public:
     void droppedFile(const std::string& path);
     void applyVirtualKeys();
     void flushRecording();
-    // Current widget bounds, useful for accessibility/UI interaction tests.
+    // Bounds are local to widgetWindow(), useful for accessibility/UI tests.
     bool widgetBounds(const std::string& name, float& x, float& y, float& width, float& height) const;
+    SDL_Window* widgetWindow(const std::string& name) const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

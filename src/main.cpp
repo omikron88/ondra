@@ -81,11 +81,13 @@ int main(int argc, char** argv) {
             SDL_Event e;
             while (SDL_PollEvent(&e)) {
                 desktop.event(e);
-                if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) { machine.releaseKeys(); focused = false; }
-                if (e.type == SDL_WINDOWEVENT && e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
+                if (e.type == SDL_WINDOWEVENT && e.window.windowID == SDL_GetWindowID(window.get())) {
+                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) { machine.releaseKeys(); focused = false; }
+                    if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
+                }
                 if (e.type == SDL_DROPFILE) {
                     const std::string path(e.drop.file); SDL_free(e.drop.file);
-                    desktop.droppedFile(path);
+                    if (e.drop.windowID == SDL_GetWindowID(window.get())) desktop.droppedFile(path);
                 }
             }
             if (!desktop.running()) break;

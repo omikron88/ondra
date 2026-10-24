@@ -31,6 +31,14 @@ struct File {
 #endif
     }
 };
+void capture(SDL_Window* window,const char* path) {
+    SDL_Renderer* renderer=SDL_GetRenderer(window); int width=0,height=0;
+    check(SDL_GetRendererOutputSize(renderer,&width,&height)==0,SDL_GetError());
+    SDL_Surface* surface=SDL_CreateRGBSurfaceWithFormat(0,width,height,32,SDL_PIXELFORMAT_ARGB8888);
+    check(surface!=NULL,SDL_GetError());
+    const bool read=SDL_RenderReadPixels(renderer,NULL,surface->format->format,surface->pixels,surface->pitch)==0;
+    const bool saved=read && SDL_SaveBMP(surface,path)==0; SDL_FreeSurface(surface); check(saved,"Cannot capture tool window");
+}
 }
 int main(int argc,char** argv) {
     try {
@@ -55,21 +63,33 @@ int main(int argc,char** argv) {
         ondra::Options options; options.config=config.path; options.mute=true;
         ondra::Desktop ui(sdl.window,sdl.renderer,machine,options);
         const auto window=SDL_GetWindowID(sdl.window);
+        auto inputWindow=window;
+        const auto mainContext=ImGui::GetCurrentContext();
         auto frame=[&]() { SDL_PumpEvents(); ui.draw(); ui.render(); };
+        auto focus=[&](Uint32 target) {
+            SDL_Event e={}; e.type=SDL_WINDOWEVENT; e.window.windowID=inputWindow; e.window.event=SDL_WINDOWEVENT_FOCUS_LOST; ui.event(e);
+            e.window.windowID=target; e.window.event=SDL_WINDOWEVENT_FOCUS_GAINED; ui.event(e); inputWindow=target; frame();
+        };
+        auto close=[&](Uint32 target) {
+            SDL_Event e={}; e.type=SDL_WINDOWEVENT; e.window.windowID=target; e.window.event=SDL_WINDOWEVENT_CLOSE; ui.event(e); frame();
+            check(ui.running(),"Closing a tool window quit the emulator"); check(SDL_GetWindowFromID(target)==NULL,"Closed tool window was not destroyed");
+        };
         auto key=[&](SDL_Scancode code,SDL_Keycode symbol,bool down,Uint16 mod) {
-            SDL_Event e={}; e.type=down?SDL_KEYDOWN:SDL_KEYUP; e.key.windowID=window;
+            SDL_Event e={}; e.type=down?SDL_KEYDOWN:SDL_KEYUP; e.key.windowID=inputWindow;
             e.key.keysym.scancode=code; e.key.keysym.sym=symbol; e.key.keysym.mod=mod; ui.event(e); frame();
         };
         auto click=[&](const char* name) {
             frame();
             float x,y,w,h; check(ui.widgetBounds(name,x,y,w,h),(std::string("Widget missing: ")+name).c_str());
-            SDL_Event e={}; e.type=SDL_MOUSEMOTION; e.motion.windowID=window; e.motion.x=static_cast<int>(x+w/2); e.motion.y=static_cast<int>(y+h/2); ui.event(e); frame();
-            e.type=SDL_MOUSEBUTTONDOWN; e.button.windowID=window; e.button.button=SDL_BUTTON_LEFT; e.button.x=static_cast<int>(x+w/2); e.button.y=static_cast<int>(y+h/2); ui.event(e); frame();
+            const auto target=SDL_GetWindowID(ui.widgetWindow(name));
+            if (inputWindow!=target) focus(target);
+            SDL_Event e={}; e.type=SDL_MOUSEMOTION; e.motion.windowID=target; e.motion.x=static_cast<int>(x+w/2); e.motion.y=static_cast<int>(y+h/2); ui.event(e); frame();
+            e.type=SDL_MOUSEBUTTONDOWN; e.button.windowID=target; e.button.button=SDL_BUTTON_LEFT; e.button.x=static_cast<int>(x+w/2); e.button.y=static_cast<int>(y+h/2); ui.event(e); frame();
             e.type=SDL_MOUSEBUTTONUP; ui.event(e); frame();
         };
         auto input=[&](const char* widget,const std::string& value) {
             click(widget); key(SDL_SCANCODE_A,SDLK_a,true,KMOD_CTRL); key(SDL_SCANCODE_A,SDLK_a,false,KMOD_NONE);
-            SDL_Event e={}; e.type=SDL_TEXTINPUT; e.text.windowID=window;
+            SDL_Event e={}; e.type=SDL_TEXTINPUT; e.text.windowID=inputWindow;
             check(value.size()<sizeof(e.text.text),"Test input too long"); std::snprintf(e.text.text,sizeof(e.text.text),"%s",value.c_str()); ui.event(e); frame();
         };
         frame(); frame();
@@ -81,8 +101,36 @@ int main(int argc,char** argv) {
         click("Pause"); check(ui.paused(),"Pause toolbar button did not pause");
         click("Pause"); check(!ui.paused(),"Pause toolbar button did not resume");
         click("Settings"); check(ui.paused() && ui.capturesKeyboard(),"Settings did not pause and capture input");
+        SDL_Window* settingsWindow=ui.widgetWindow("Settings.Cancel");
+        check(settingsWindow && settingsWindow!=sdl.window && SDL_GetRenderer(settingsWindow)!=sdl.renderer,"Settings is not a separate SDL window/renderer");
+        frame(); if (argc>2) capture(settingsWindow,argv[2]);
+        focus(SDL_GetWindowID(settingsWindow));
+        key(SDL_SCANCODE_F2,SDLK_F2,true,KMOD_NONE); key(SDL_SCANCODE_F2,SDLK_F2,false,KMOD_NONE);
+        check(ui.paused(),"Settings allowed a shortcut to resume the machine");
+        click("Settings.SdBrowse"); check(ui.widgetWindow("File.Accept")==settingsWindow,"Settings file picker opened in the wrong window");
+        click("File.Cancel");
         click("Settings.Cancel"); check(!ui.paused(),"Settings cancel did not restore run state");
+        frame();
+        for (unsigned n=0;n<3;++n) {
+            click("Settings"); const auto id=SDL_GetWindowID(ui.widgetWindow("Settings.Cancel"));
+            click("Settings.SdBrowse"); close(id); check(!ui.paused(),"Native Settings close did not restore run state");
+        }
+        int mainWidth=0,mainHeight=0; SDL_GetWindowSize(sdl.window,&mainWidth,&mainHeight);
         click("Debugger"); check(ui.paused() && ui.capturesKeyboard(),"Debugger did not pause");
+        SDL_Window* debuggerWindow=ui.widgetWindow("Debug.Step");
+        check(debuggerWindow && debuggerWindow!=sdl.window && SDL_GetRenderer(debuggerWindow)!=sdl.renderer,"Debugger is not a separate SDL window/renderer");
+        SDL_SetWindowSize(debuggerWindow,1000,760); SDL_SetWindowPosition(debuggerWindow,1400,60); frame();
+        int width=0,height=0; SDL_GetWindowSize(sdl.window,&width,&height);
+        check(width==mainWidth && height==mainHeight,"Opening/resizing Debugger resized the emulator");
+        click("Debug.Run"); check(!ui.paused(),"Debugger Run did not resume"); focus(window);
+        check(!ui.capturesKeyboard(),"Open Debugger blocked input in the focused emulator window");
+        close(SDL_GetWindowID(debuggerWindow)); check(!ui.paused(),"Closing a running debugger paused the machine");
+        click("Debugger"); debuggerWindow=ui.widgetWindow("Debug.Step");
+        focus(SDL_GetWindowID(debuggerWindow)); key(SDL_SCANCODE_F8,SDLK_F8,true,KMOD_NONE); key(SDL_SCANCODE_F8,SDLK_F8,false,KMOD_NONE);
+        check(ui.widgetWindow("File.Accept")==debuggerWindow,"Debugger shortcut opened a file picker in the wrong window");
+        close(SDL_GetWindowID(debuggerWindow)); check(ui.paused(),"Closing a paused debugger resumed the machine");
+        click("Debugger"); debuggerWindow=ui.widgetWindow("Debug.Step");
+        check(ImGui::GetCurrentContext()==mainContext,"Tool window leaked its ImGui context");
         machine.output(3,2); machine.ram().fill(0); machine.jump(0x4000); Z80_SP(machine.cpu())=0xd000;
         machine.ram()[0x4000]=0x3e; machine.ram()[0x4001]=1; machine.ram()[0x4002]=0xcd;
         machine.ram()[0x4003]=0; machine.ram()[0x4004]=0x41; machine.ram()[0x4100]=0x3c; machine.ram()[0x4101]=0xc9;
@@ -101,12 +149,13 @@ int main(int argc,char** argv) {
         input("Debug.Memory16384","3C"); check(machine.ram()[0x4000]==0x3e,"Memory changed before Enter");
         key(SDL_SCANCODE_RETURN,SDLK_RETURN,true,KMOD_NONE); key(SDL_SCANCODE_RETURN,SDLK_RETURN,false,KMOD_NONE);
         check(machine.ram()[0x4000]==0x3c,"Memory editor did not commit");
-        if (argc>1) { ui.draw(); ui.render(argv[1]); }
+        if (argc>1) capture(debuggerWindow,argv[1]);
         // File picker must preserve UTF-8 names and the paused state, and must
         // load/save through real UI events rather than bypassing the dialog.
         const std::string name="ui-"+std::to_string(SDL_GetTicks()%100000)+"-\xc5\xbe.osn";
         File snapshot(name); machine.ram()[0x5000]=0xa5;
-        click("Save snapshot"); input("File.Name",name); click("File.Accept");
+        click("Save snapshot"); click("Debug.Run"); check(ui.paused(),"Debugger resumed while a file picker was open in the main window");
+        input("File.Name",name); click("File.Accept");
         check(!ondra::canonical(name).empty(),"Snapshot save dialog did not create a file");
         check(ui.paused(),"Save dialog lost paused state"); machine.ram()[0x5000]=0; machine.jump(0x8000);
         click("Open snapshot"); input("File.Name",name); click("File.Accept");
@@ -131,6 +180,9 @@ int main(int argc,char** argv) {
         File printerFile("ui-prn-\xc5\xbe-"+std::to_string(SDL_GetTicks()%100000)+".prn");
         machine.sound().setMelodik(true);
         click("Settings"); click("Settings.Printers"); click("Settings.Centronics");
+        input("Settings.PrinterFile","."); click("Settings.Apply");
+        check(ui.widgetWindow("Message.OK")==ui.widgetWindow("Settings.Cancel"),"Settings error opened in the wrong window");
+        click("Message.OK");
         input("Settings.PrinterFile",printerFile.path); click("Settings.Apply");
         check(machine.printer().enabled() && !machine.sound().melodik() && !machine.bt100().enabled(),"Selecting Centronics did not disconnect Melodik");
         machine.output(0x0a,8); machine.output(9,'A'); machine.output(0x0a,0);
@@ -147,8 +199,11 @@ int main(int argc,char** argv) {
         click("Printer.Power"); check(!machine.bt100().powered(),"BT100 power off failed");
         key(SDL_SCANCODE_F6,SDLK_F6,true,KMOD_NONE); key(SDL_SCANCODE_F6,SDLK_F6,false,KMOD_NONE);
         check(machine.turbo(),"Turbo keyboard shortcut failed");
-        SDL_Event quit={}; quit.type=SDL_QUIT; ui.event(quit); check(!ui.running(),"Quit event did not stop desktop");
-        std::cout<<"PASS UI: preferences, pause/run, settings/input capture, debugger step/step-over, register/memory/breakpoint edits, UTF-8 snapshot save/load, overwrite confirmation, BIN save/load, invalid-file recovery, printers/PNG/paper/power, cancel, turbo, quit\n";
+        SDL_Event unrelated={}; unrelated.type=SDL_KEYDOWN; unrelated.key.windowID=0xffffffffu; unrelated.key.keysym.scancode=SDL_SCANCODE_F6;
+        ui.event(unrelated); check(machine.turbo(),"An unrelated SDL window triggered a shortcut");
+        SDL_Event quit={}; quit.type=SDL_WINDOWEVENT; quit.window.windowID=window; quit.window.event=SDL_WINDOWEVENT_CLOSE;
+        ui.event(quit); check(!ui.running(),"Native main-window close did not stop desktop");
+        std::cout<<"PASS UI: independent SDL Settings/Debugger, event routing, focus, resize/move, native close/reopen, context/texture isolation, owned file/error dialogs, preferences, pause/run, debugger edits, UTF-8 snapshots, overwrite confirmation, BIN, printers/PNG, turbo, quit\n";
         return 0;
     } catch (const std::exception& e) { std::cerr<<"FAIL UI: "<<e.what()<<'\n'; return 1; }
 }
